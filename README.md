@@ -8,6 +8,7 @@
   <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-lightgrey">
   <img alt="Flatpak" src="https://img.shields.io/badge/Flatpak-ready-4A90D9">
   <img alt="Status" src="https://img.shields.io/badge/status-beta-yellow">
+  <a href="https://ko-fi.com/gishi"><img alt="Ko-fi" src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white"></a>
 </p>
 
 <p align="center">
@@ -190,6 +191,11 @@ checklist.
 - AcoustID identification needs an application key.
 - The `verified/` tree selects the best complete airing; it does not stitch a
   missing intro or outro from several airings yet.
+
+## Support
+
+VibeRadio is free and open source. If it is useful to you, you can support
+development on [Ko-fi](https://ko-fi.com/gishi).
 
 ## License
 
