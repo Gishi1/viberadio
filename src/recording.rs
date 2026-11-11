@@ -41,6 +41,10 @@ pub struct RecordingConfig {
     /// Remove split files shorter than this when they close, before
     /// fingerprinting; 0 keeps every file.
     pub min_fingerprint_seconds: u32,
+    /// Keep split files even when they are shorter than
+    /// `min_fingerprint_seconds`. Set for explicit wish captures, where the
+    /// user asked for the track and a partial recording is still wanted.
+    pub keep_short: bool,
 }
 
 impl RecordingConfig {
@@ -55,6 +59,7 @@ impl RecordingConfig {
             tag_format: None,
             min_track_seconds: 0,
             min_fingerprint_seconds: 0,
+            keep_short: false,
         }
     }
 }
@@ -669,9 +674,16 @@ impl Writer {
                 return;
             }
             if self.config.mode == RecordingMode::SplitPerTrack
+                && !self.config.keep_short
                 && self.config.min_fingerprint_seconds > 0
                 && elapsed < Duration::from_secs(u64::from(self.config.min_fingerprint_seconds))
             {
+                log::info!(
+                    "discarding {} after {}s; below the {}s fingerprint minimum",
+                    path.display(),
+                    elapsed.as_secs(),
+                    self.config.min_fingerprint_seconds
+                );
                 let _ = std::fs::remove_file(&path);
                 self.files = self.files.saturating_sub(1);
                 if let Some(log) = self.metadata_log.take() {
@@ -691,6 +703,10 @@ impl Writer {
             {
                 // Wishlist mode records continuously but only keeps wanted
                 // songs; everything else is discarded at the track boundary.
+                log::info!(
+                    "discarding {}; the track does not match a record wish",
+                    path.display()
+                );
                 let _ = std::fs::remove_file(&path);
                 self.files = self.files.saturating_sub(1);
             } else {
@@ -1033,6 +1049,25 @@ mod tests {
         assert_eq!(summary.files, 0);
         assert!(summary.paths.is_empty());
         assert!(!dir.join("Artist - Song.bin").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wish_captures_keep_short_files() {
+        let dir = temp_dir("wish-short");
+        let mut config = RecordingConfig::new(&dir);
+        config.template = "{artist} - {title}".to_string();
+        config.mode = RecordingMode::SplitPerTrack;
+        config.extension = "bin".to_string();
+        config.min_fingerprint_seconds = 30;
+        config.keep_short = true;
+        let recording = Recording::start(config, "Test FM".to_string(), Local::now()).unwrap();
+        recording.write(b"audio");
+        recording.set_track(Some("Artist"), Some("Song"));
+        recording.write(b"more");
+        let summary = recording.finish();
+        assert_eq!(summary.files, 1);
+        assert!(dir.join("Artist - Song.bin").is_file());
         let _ = fs::remove_dir_all(&dir);
     }
 

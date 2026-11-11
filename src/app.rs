@@ -3623,6 +3623,9 @@ impl VibeRadioApp {
         config.min_track_seconds = self.recording_min_track_seconds;
         config.min_fingerprint_seconds = self.recording_min_fingerprint_seconds;
         if wishlist_only {
+            // A wish hit is explicit: keep the capture even when the remaining
+            // audio is shorter than the pre-fingerprint minimum.
+            config.keep_short = true;
             config.wishlist = self.wishlist.clone();
             config.tag_format = stream.station_id.and_then(|id| {
                 self.db
@@ -3854,6 +3857,9 @@ impl VibeRadioApp {
         config.template = self.recording_template.clone();
         config.min_track_seconds = self.recording_min_track_seconds;
         config.min_fingerprint_seconds = self.recording_min_fingerprint_seconds;
+        // The hit is an explicit request; keep a short capture rather than
+        // letting the pre-fingerprint length filter delete it.
+        config.keep_short = true;
         config.wishlist = self.wishlist.clone();
         config.tag_format = self
             .db
