@@ -212,8 +212,9 @@ release; GitLab builds the Linux artifact. See
 - Linux is the tested target. CI also produces Windows x86_64 and macOS
   (Apple Silicon and Intel) builds, but they have not been run on real hardware
   yet; bug reports are welcome.
-- Windows audio output is unverified. The CI runner has no working output
-  device, so the playback tests are skipped there.
+- Windows and macOS audio output is unverified. Hosted CI runners expose an
+  output device that never consumes samples, so the playback tests are skipped
+  there.
 - HLS (`.m3u8`) streams are not played.
 - AAC-LC is supported through symphonia; HE-AAC (SBR) and Opus are not fully
   decoded.
