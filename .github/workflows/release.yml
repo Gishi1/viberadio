@@ -38,9 +38,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libasound2-dev libxkbcommon-dev \
-            libwayland-dev libx11-dev libgl1-mesa-dev
+            libwayland-dev libx11-dev libgl1-mesa-dev patchelf file
       - name: Build and package
         run: ${{ matrix.package }}
+        env:
+          CARGO_BUILD_JOBS: 2
+      - name: Build AppImage
+        if: runner.os == 'Linux'
+        run: ./scripts/package-appimage.sh
         env:
           CARGO_BUILD_JOBS: 2
       - uses: actions/upload-artifact@v4
@@ -49,6 +54,7 @@ jobs:
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.AppImage
           if-no-files-found: error
 
   publish:
@@ -64,7 +70,7 @@ jobs:
         run: |
           cd dist
           rm -f SHA256SUMS
-          sha256sum *.tar.gz *.zip > SHA256SUMS
+          sha256sum *.tar.gz *.zip *.AppImage > SHA256SUMS
           cat SHA256SUMS
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -72,5 +78,6 @@ jobs:
           files: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.AppImage
             dist/SHA256SUMS
           generate_release_notes: true

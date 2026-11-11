@@ -44,6 +44,7 @@ packaging scripts:
 | Script | Output |
 | --- | --- |
 | `scripts/release.sh` | Linux tarball with desktop integration files |
+| `scripts/package-appimage.sh` | `viberadio-<version>-linux-<arch>.AppImage` |
 | `scripts/package-macos.sh` | `viberadio-<version>-macos-<arch>.tar.gz` |
 | `scripts/package-windows.ps1` | `viberadio-<version>-windows-x86_64.zip` |
 
@@ -61,9 +62,9 @@ Options:
 ### GitHub
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds Linux
-x86_64, Windows x86_64, macOS Apple Silicon and macOS Intel in parallel,
-generates one `SHA256SUMS` and attaches every archive to a GitHub release with
-generated notes.
+x86_64 (tarball and AppImage), Windows x86_64, macOS Apple Silicon and macOS
+Intel in parallel, generates one `SHA256SUMS` and attaches every archive to a
+GitHub release with generated notes.
 
 ### GitLab
 

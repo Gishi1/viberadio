@@ -113,6 +113,20 @@ tar xzf viberadio-0.1.0-linux-x86_64.tar.gz
 The tarball contains the binary, desktop file, icon, AppStream metadata and
 license.
 
+### AppImage
+
+Download `viberadio-<version>-linux-x86_64.AppImage`, make it executable and
+run it:
+
+```bash
+chmod +x viberadio-0.1.0-linux-x86_64.AppImage
+./viberadio-0.1.0-linux-x86_64.AppImage
+```
+
+The AppImage bundles the shared libraries it needs. It still requires FUSE; on
+a distribution without it, install `libfuse2` or run with
+`--appimage-extract-and-run`.
+
 ### macOS
 
 Download `viberadio-<version>-macos-aarch64.tar.gz` for Apple Silicon or
