@@ -679,7 +679,12 @@ impl DbManager {
             }
             let _ = std::fs::remove_file(&temp);
             std::fs::copy(&source, &temp)?;
-            std::fs::File::open(&temp)?.sync_all()?;
+            // `FlushFileBuffers` needs write access on Windows, so open for
+            // writing rather than using `File::open`.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&temp)?
+                .sync_all()?;
             std::fs::rename(&temp, &live)?;
             std::fs::remove_file(&marker)?;
             prune_prefixed(dir, "viberadio-before-restore-", ".db", 5);
