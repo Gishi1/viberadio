@@ -3597,13 +3597,13 @@ mod tests {
     }
 
     fn has_audio_device() -> bool {
-        match OutputStream::try_default() {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("no audio output device ({e}); skipping playback test");
-                false
-            }
+        // Probe for an endpoint rather than building and dropping a stream:
+        // stream teardown starts and stops a device callback for nothing.
+        let present = cpal::default_host().default_output_device().is_some();
+        if !present {
+            eprintln!("no audio output device; skipping playback test");
         }
+        present
     }
 
     fn snapshot_streams(player: &RadioPlayer) -> Vec<StreamSnapshot> {
