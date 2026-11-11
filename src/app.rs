@@ -187,6 +187,8 @@ pub struct VibeRadioApp {
     /// Remove split files shorter than this before fingerprinting; 0 keeps
     /// every file.
     recording_min_fingerprint_seconds: u32,
+    /// Compressed audio kept for each watched station, in MiB.
+    watch_buffer_mb: u32,
     last_space_check: Instant,
     acoustid_api_key: String,
     fingerprint_scan:
@@ -683,6 +685,12 @@ impl VibeRadioApp {
             .and_then(|db| db.get_setting("recording_min_fingerprint_seconds").ok().flatten())
             .and_then(|value| value.parse::<u32>().ok())
             .unwrap_or(30);
+        let watch_buffer_mb = db
+            .as_ref()
+            .and_then(|db| db.get_setting("watch_buffer_mb").ok().flatten())
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(4)
+            .clamp(1, 64);
         let sleep_shutdown = db
             .as_ref()
             .and_then(|db| db.get_setting("sleep_shutdown").ok().flatten())
@@ -812,6 +820,7 @@ impl VibeRadioApp {
             recording_codec,
             recording_min_track_seconds,
             recording_min_fingerprint_seconds,
+            watch_buffer_mb,
             last_space_check: Instant::now(),
             acoustid_api_key,
             fingerprint_scan: None,
@@ -3751,6 +3760,7 @@ impl VibeRadioApp {
             reconnect: Some(ReconnectPolicy::default()),
             record_only: true,
             watch,
+            watch_buffer_bytes: self.watch_buffer_mb as usize * 1024 * 1024,
             ..PlayRequest::new(url)
         });
         if let Some(db) = &self.db {
@@ -6473,6 +6483,27 @@ impl eframe::App for VibeRadioApp {
                                     .color(theme.text_secondary),
                             );
                             ui.separator();
+                            ui.strong(t("settings.watched"));
+                            ui.horizontal(|ui| {
+                                ui.label(t("settings.watch_buffer"));
+                                let response = ui.add(
+                                    egui::DragValue::new(&mut self.watch_buffer_mb)
+                                        .range(1..=64)
+                                        .suffix(" MB"),
+                                );
+                                if response.changed() {
+                                    let bytes = self.watch_buffer_mb as usize * 1024 * 1024;
+                                    for id in self.watch_streams.values().copied() {
+                                        self.player.set_watch_capacity(id, bytes);
+                                    }
+                                }
+                            });
+                            ui.label(
+                                egui::RichText::new(t("settings.watch_buffer_note"))
+                                    .size(12.0)
+                                    .color(theme.text_secondary),
+                            );
+                            ui.separator();
                             ui.strong(t("settings.fingerprinting"));
                             ui.label(t("settings.acoustid_key"));
                             let key_response =
@@ -6655,6 +6686,10 @@ impl eframe::App for VibeRadioApp {
                     let _ = db.set_setting(
                         "recording_min_fingerprint_seconds",
                         &self.recording_min_fingerprint_seconds.to_string(),
+                    );
+                    let _ = db.set_setting(
+                        "watch_buffer_mb",
+                        &self.watch_buffer_mb.to_string(),
                     );
                     let _ = db.set_setting(
                         "sleep_shutdown",

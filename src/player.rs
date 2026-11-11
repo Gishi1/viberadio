@@ -197,6 +197,8 @@ pub struct PlayRequest {
     /// Keep a rolling audio buffer so a wish can be recorded from the start of
     /// the current song.
     pub watch: bool,
+    /// Bytes of compressed audio kept per watched station.
+    pub watch_buffer_bytes: usize,
 }
 
 impl PlayRequest {
@@ -210,6 +212,7 @@ impl PlayRequest {
             reconnect: None,
             record_only: false,
             watch: false,
+            watch_buffer_bytes: WATCH_BUFFER_BYTES,
         }
     }
 }
@@ -534,6 +537,13 @@ impl RadioPlayer {
         shared.promote_watch(config, station, artist, title)
     }
 
+    /// Resize the watch buffer of a running watched stream.
+    pub fn set_watch_capacity(&self, id: PlaybackId, bytes: usize) {
+        if let Some(shared) = self.streams.lock().unwrap().get(&id).cloned() {
+            shared.set_watch_capacity(bytes);
+        }
+    }
+
     /// Close the recording and return a join handle, so the UI can poll instead
     /// of waiting for a slow disk.
     pub fn stop_recording_async(&self, id: PlaybackId) -> Option<JoinHandle<RecordedSummary>> {        let shared = self.streams.lock().unwrap().get(&id).cloned()?;
@@ -735,13 +745,36 @@ struct WatchBuffer {
 }
 
 impl WatchBuffer {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_capacity(WATCH_BUFFER_BYTES)
+    }
+
+    fn with_capacity(cap: usize) -> Self {
         Self {
             data: VecDeque::new(),
             base: 0,
             end: 0,
             marks: VecDeque::new(),
-            cap: WATCH_BUFFER_BYTES,
+            cap: cap.max(1),
+        }
+    }
+
+    /// Resize the rolling window, dropping the oldest audio and any marks that
+    /// fall outside it.
+    fn set_capacity(&mut self, cap: usize) {
+        self.cap = cap.max(1);
+        if self.data.len() > self.cap {
+            let drop = self.data.len() - self.cap;
+            self.data.drain(..drop);
+            self.base += drop as u64;
+        }
+        while let Some((at, _)) = self.marks.front() {
+            if *at < self.base {
+                self.marks.pop_front();
+            } else {
+                break;
+            }
         }
     }
 
@@ -855,7 +888,11 @@ impl StreamShared {
             dsp_preset,
             stream_seconds,
             ring_limit: AtomicUsize::new(RING_SAMPLES),
-            watch: Mutex::new(request.watch.then(WatchBuffer::new)),
+            watch: Mutex::new(
+                request
+                    .watch
+                    .then(|| WatchBuffer::with_capacity(request.watch_buffer_bytes)),
+            ),
             watching: request.watch,
         }
     }
@@ -1261,6 +1298,15 @@ impl StreamShared {
         }
         *recording = Some(handle);
         Ok(true)
+    }
+
+    /// Resize the rolling buffer of a watched stream. Existing audio is kept
+    /// up to the new limit; the oldest bytes are dropped when it shrinks.
+    fn set_watch_capacity(&self, bytes: usize) {
+        let mut watch = self.watch.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(buffer) = watch.as_mut() {
+            buffer.set_capacity(bytes);
+        }
     }
 
     fn snapshot(&self) -> StreamSnapshot {
@@ -3313,6 +3359,21 @@ mod tests {
         assert!(buffer.marks.is_empty());
         let (audio, label) = buffer.take_since_mark();
         assert_eq!(audio, b"fghi");
+        assert!(label.is_none());
+    }
+
+    #[test]
+    fn watch_buffer_capacity_can_shrink() {
+        let mut buffer = WatchBuffer::new();
+        buffer.push(&[1u8; 1024]);
+        buffer.mark("Song".into());
+        buffer.push(&[2u8; 4096]);
+        buffer.set_capacity(2048);
+        assert_eq!(buffer.data.len(), 2048);
+        assert_eq!(buffer.base, 3072);
+        assert!(buffer.marks.is_empty(), "the mark fell outside the window");
+        let (audio, label) = buffer.take_since_mark();
+        assert_eq!(audio.len(), 2048);
         assert!(label.is_none());
     }
 
