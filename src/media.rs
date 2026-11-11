@@ -140,6 +140,8 @@ impl Media {
         if let Err(e) = self.controls.set_playback(playback) {
             self.warn(e);
         }
+        // Only the MPRIS backend exposes a volume property.
+        #[cfg(target_os = "linux")]
         if let Err(e) = self
             .controls
             .set_volume(state.volume.clamp(0.0, 1.0) as f64)

@@ -5,7 +5,7 @@
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/rust-1.86%2B-orange">
   <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
-  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux-lightgrey">
+  <img alt="Platform" src="https://img.shields.io/badge/platform-Linux%20%7C%20Windows%20%7C%20macOS-lightgrey">
   <img alt="Flatpak" src="https://img.shields.io/badge/Flatpak-ready-4A90D9">
   <img alt="Status" src="https://img.shields.io/badge/status-beta-yellow">
   <a href="https://ko-fi.com/gishi"><img alt="Ko-fi" src="https://img.shields.io/badge/Ko--fi-support-ff5e5b?logo=ko-fi&logoColor=white"></a>
@@ -97,7 +97,7 @@ flatpak run io.github.gishi1.VibeRadio
 The manifest builds offline from the vendored `flatpak/cargo-sources.json` and
 installs the desktop entry, AppStream metadata and icon.
 
-### Release tarball
+### Linux tarball
 
 Download `viberadio-<version>-linux-x86_64.tar.gz` from the releases page,
 extract it and run the binary:
@@ -109,6 +109,31 @@ tar xzf viberadio-0.1.0-linux-x86_64.tar.gz
 
 The tarball contains the binary, desktop file, icon, AppStream metadata and
 license.
+
+### macOS
+
+Download `viberadio-<version>-macos-aarch64.tar.gz` for Apple Silicon or
+`viberadio-<version>-macos-x86_64.tar.gz` for Intel, extract it and run the
+binary:
+
+```bash
+tar xzf viberadio-0.1.0-macos-aarch64.tar.gz
+./viberadio-0.1.0-macos-aarch64/viberadio
+```
+
+The build is unsigned, so macOS may refuse to open it. Allow it once under
+**System Settings → Privacy & Security → Open Anyway**, or clear the quarantine
+flag:
+
+```bash
+xattr -d com.apple.quarantine viberadio-0.1.0-macos-aarch64/viberadio
+```
+
+### Windows
+
+Download `viberadio-<version>-windows-x86_64.zip`, extract it and run
+`viberadio.exe`. SmartScreen may warn about an unsigned executable; choose
+**More info → Run anyway**.
 
 ### Build from source
 
@@ -176,15 +201,17 @@ checklist is [`docs/RELEASE.md`](docs/RELEASE.md).
 
 ## Releases
 
-`scripts/release.sh` builds a release binary, packages a tarball and checksums,
-and can tag the commit. CI runs the same script on GitHub and GitLab when a
-`v*` tag is pushed. See [`docs/RELEASE.md`](docs/RELEASE.md) for the full
-checklist.
+`scripts/release.sh` builds a Linux release, packages a tarball and checksums,
+and can tag the commit. Pushing a `v*` tag runs the packaging scripts for
+Linux, Windows and macOS on GitHub Actions and attaches every archive to the
+release; GitLab builds the Linux artifact. See
+[`docs/RELEASE.md`](docs/RELEASE.md) for the full checklist.
 
 ## Limitations
 
-- Linux is the supported target; Windows and macOS code paths exist but are not
-  packaged.
+- Linux is the tested target. CI also produces Windows x86_64 and macOS
+  (Apple Silicon and Intel) builds, but they have not been run on real hardware
+  yet; bug reports are welcome.
 - HLS (`.m3u8`) streams are not played.
 - AAC-LC is supported through symphonia; HE-AAC (SBR) and Opus are not fully
   decoded.

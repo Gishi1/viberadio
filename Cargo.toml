@@ -68,22 +68,27 @@ dirs = "4.0"
 
 # OS media keys and now-playing metadata: MPRIS on Linux over zbus (no
 # libdbus), System Media Transport Controls on Windows, Now Playing on macOS.
-souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
+# The zbus backend is Linux-only; the other targets select their native
+# backend from souvlaki's own cfg-gated modules.
 id3 = "1.17.3"
 image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 
-# Linux tray icon via StatusNotifierItem over D-Bus. Chosen over tray-icon
-# because it needs no GTK/AppIndicator build dependency; other platforms fall
-# back to no tray until a native implementation is added.
 [target.'cfg(unix)'.dependencies]
 # Already in the tree through cpal; declared directly for statvfs.
 libc = "0.2"
 
+# Linux tray icon via StatusNotifierItem over D-Bus. Chosen over tray-icon
+# because it needs no GTK/AppIndicator build dependency; other platforms fall
+# back to no tray until a native implementation is added.
 [target.'cfg(target_os = "linux")'.dependencies]
+souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
 ksni = { version = "0.3", features = ["blocking"] }
 # Already in the tree through souvlaki; declared directly so startup can ask
 # the session bus whether another window owns the MPRIS name.
 zbus = "3.15"
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+souvlaki = { version = "0.8.3", default-features = false }
 
 # Pin problematic transitive dependencies
 [dependencies.url]

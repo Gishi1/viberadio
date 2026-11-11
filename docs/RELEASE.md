@@ -38,7 +38,14 @@ dist/
 ```
 
 The tarball contains the binary, README, LICENSE, desktop entry, icon and
-AppStream metadata.
+AppStream metadata. macOS and Windows reuse the same build step with their own
+packaging scripts:
+
+| Script | Output |
+| --- | --- |
+| `scripts/release.sh` | Linux tarball with desktop integration files |
+| `scripts/package-macos.sh` | `viberadio-<version>-macos-<arch>.tar.gz` |
+| `scripts/package-windows.ps1` | `viberadio-<version>-windows-x86_64.zip` |
 
 Options:
 
@@ -53,13 +60,17 @@ Options:
 
 ### GitHub
 
-Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds the tarball
-and checksums and attaches them to a GitHub release with generated notes.
+Pushing a `v*` tag runs `.github/workflows/release.yml`. It builds Linux
+x86_64, Windows x86_64, macOS Apple Silicon and macOS Intel in parallel,
+generates one `SHA256SUMS` and attaches every archive to a GitHub release with
+generated notes.
 
 ### GitLab
 
 Pushing a `v*` tag runs the `build` job in `.gitlab-ci.yml` and creates a GitLab
-release with the tarball and checksum links.
+release with the Linux tarball and checksum links. GitLab has no hosted macOS
+runners, and its Windows runner does not ship a Rust toolchain, so the Windows
+and macOS archives come from GitHub Actions.
 
 ### Flatpak
 
