@@ -21,8 +21,13 @@ jobs:
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          # The hosted runner's Azure mirror alias can fail to resolve. Point
+          # apt at the upstream archive and retry transient failures.
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
             build-essential pkg-config libasound2-dev libxkbcommon-dev \
             libwayland-dev libx11-dev libgl1-mesa-dev
       - name: Run tests
