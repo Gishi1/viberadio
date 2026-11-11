@@ -6136,14 +6136,7 @@ impl eframe::App for VibeRadioApp {
                 .show(ctx, |ui| {
                     ui.label(t("watch_history.note"));
                     ui.separator();
-                    let rows: Vec<&crate::models::StationHistory> = self
-                        .history
-                        .iter()
-                        .filter(|row| {
-                            watched.contains(&row.station_id) && row.song_title.is_some()
-                        })
-                        .take(200)
-                        .collect();
+                    let rows = watch_history_rows(&self.history, &watched);
                     if rows.is_empty() {
                         ui.label(t("watch_history.empty"));
                     }
@@ -7336,6 +7329,48 @@ fn next_index(len: usize, current: Option<usize>, delta: i32) -> Option<usize> {
     }
 }
 
+/// Rows for the watch-history window: watched stations with a song title, one
+/// entry per station and song. The newest row wins, and trailing qualifiers
+/// such as "(Radio Edit)" do not create a second entry.
+fn watch_history_rows<'a>(
+    history: &'a [crate::models::StationHistory],
+    watched: &HashSet<Uuid>,
+) -> Vec<&'a crate::models::StationHistory> {
+    let mut seen = HashSet::new();
+    let mut rows = Vec::new();
+    for row in history
+        .iter()
+        .filter(|row| watched.contains(&row.station_id) && row.song_title.is_some())
+    {
+        let artist = row.artist.as_deref().unwrap_or("").trim().to_lowercase();
+        let title = normalized_song_title(row.song_title.as_deref().unwrap_or(""));
+        if seen.insert((row.station_id, artist, title)) {
+            rows.push(row);
+            if rows.len() >= 200 {
+                break;
+            }
+        }
+    }
+    rows
+}
+
+/// Lowercase a song title and drop trailing bracketed qualifiers, so two
+/// streams that label the same song differently collapse to one entry.
+fn normalized_song_title(title: &str) -> String {
+    let mut value = title.trim().to_lowercase();
+    loop {
+        let trimmed = value.trim_end();
+        if !trimmed.ends_with(')') && !trimmed.ends_with(']') && !trimmed.ends_with('}') {
+            break;
+        }
+        let Some(open) = trimmed.rfind(|c| matches!(c, '(' | '[' | '{')) else {
+            break;
+        };
+        value = trimmed[..open].trim_end().to_string();
+    }
+    value
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7346,6 +7381,37 @@ mod tests {
         station.bitrate = bitrate;
         station.is_favorite = favorite;
         station
+    }
+
+    #[test]
+    fn watch_history_dedupes_streams_and_edit_suffixes() {
+        let station_id = Uuid::new_v4();
+        let mut watched = HashSet::new();
+        watched.insert(station_id);
+        let row = |artist: &str, title: &str, minutes: u32| crate::models::StationHistory {
+            id: Uuid::new_v4(),
+            play_instance_id: None,
+            station_id,
+            station_name: "Station".to_string(),
+            url: None,
+            artist: Some(artist.to_string()),
+            song_title: Some(title.to_string()),
+            played_at: chrono::Utc::now() - chrono::Duration::minutes(i64::from(minutes)),
+            duration_seconds: 0,
+            status: "ended".to_string(),
+        };
+        let history = vec![
+            row("Miss Monique", "Blue Moon Factory", 0),
+            row("Miss Monique", "Blue Moon Factory", 0),
+            row("Avicii", "My Feelings for You", 2),
+            row("Avicii", "My Feelings for You (Radio Edit)", 3),
+            row("Other", "Different Song", 4),
+        ];
+        let rows = watch_history_rows(&history, &watched);
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].song_title.as_deref(), Some("Blue Moon Factory"));
+        assert_eq!(rows[1].song_title.as_deref(), Some("My Feelings for You"));
+        assert_eq!(rows[2].song_title.as_deref(), Some("Different Song"));
     }
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
