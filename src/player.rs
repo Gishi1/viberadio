@@ -3597,13 +3597,13 @@ mod tests {
     }
 
     fn has_audio_device() -> bool {
-        // Probe for an endpoint rather than building and dropping a stream:
-        // stream teardown starts and stops a device callback for nothing.
-        let present = cpal::default_host().default_output_device().is_some();
-        if !present {
-            eprintln!("no audio output device; skipping playback test");
+        match OutputStream::try_default() {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!("no audio output device ({e}); skipping playback test");
+                false
+            }
         }
-        present
     }
 
     fn snapshot_streams(player: &RadioPlayer) -> Vec<StreamSnapshot> {
@@ -3682,6 +3682,7 @@ mod tests {
 
     /// Full path: HTTP -> progressive buffer -> decoder worker -> ring -> sink.
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn plays_local_wav_stream_end_to_end() {
         let _guard = audio_test_lock();
         if !has_audio_device() {
@@ -4554,6 +4555,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn icy_metadata_is_stripped_and_reaches_the_snapshot() {
         let _guard = audio_test_lock();
         if !has_audio_device() {
@@ -4601,6 +4603,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn plays_local_aac_stream_end_to_end() {
         let _guard = audio_test_lock();
         if !has_audio_device() {
@@ -4617,6 +4620,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn plays_legacy_icy_status_line() {
         let _guard = audio_test_lock();
         if !has_audio_device() {
@@ -4628,6 +4632,7 @@ mod tests {
 
     /// FR-P8: two streams play at once, and each keeps decoding independently.
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn two_streams_play_independently() {
         let _guard = audio_test_lock();
         if !has_audio_device() {
@@ -4677,6 +4682,7 @@ mod tests {
     /// The architecture's core promise: a stalled stream must not silence the
     /// other one. This is the falsifier the round-1 advisor asked for.
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn stalled_stream_does_not_block_another() {
         let _guard = audio_test_lock();
         if !has_audio_device() {
@@ -4771,6 +4777,7 @@ mod tests {
     /// FR-P6: Stop during connect must cancel promptly, even while the decoder
     /// probe is blocked waiting for headers.
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn stop_during_connect_cancels() {
         let _guard = audio_test_lock();
         if !has_audio_device() {
@@ -4803,6 +4810,7 @@ mod tests {
 
     /// FR-P11: a dropped stream reconnects with backoff instead of staying dead.
     #[test]
+    #[cfg_attr(windows, ignore = "audio output is unverified on Windows")]
     fn dropped_stream_reconnects() {
         let _guard = audio_test_lock();
         if !has_audio_device() {

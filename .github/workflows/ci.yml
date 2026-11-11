@@ -26,12 +26,4 @@ jobs:
             build-essential pkg-config libasound2-dev libxkbcommon-dev \
             libwayland-dev libx11-dev libgl1-mesa-dev
       - name: Run tests
-        if: runner.os != 'Windows'
         run: cargo test --locked
-      # The Windows runner has no audio device and few cores; running tests
-      # one at a time keeps device probing and teardown deterministic.
-      - name: Run tests (serial)
-        if: runner.os == 'Windows'
-        run: cargo test --locked -- --test-threads=1
-        env:
-          RUST_BACKTRACE: "1"
