@@ -61,15 +61,18 @@ pub struct Media {
 impl Media {
     /// Create the platform media controls. `wake` is called after each event so
     /// the app repaints without waiting for its periodic tick.
-    pub fn start(state: MediaState, wake: impl Fn() + Send + Sync + 'static) -> Option<Media> {
-        // souvlaki's Windows backend panics without a window handle, and this
-        // app does not pass one yet. Disable it there rather than crash.
-        #[cfg(target_os = "windows")]
-        {
-            log::info!("media controls are not wired on Windows yet");
-            return None;
-        }
+    ///
+    /// Windows is disabled until the app can pass its window handle: souvlaki's
+    /// backend panics without one.
+    #[cfg(target_os = "windows")]
+    pub fn start(_state: MediaState, _wake: impl Fn() + Send + Sync + 'static) -> Option<Media> {
+        log::info!("media controls are not wired on Windows yet");
+        None
+    }
 
+    /// Create the platform media controls on platforms whose backend is wired.
+    #[cfg(not(target_os = "windows"))]
+    pub fn start(state: MediaState, wake: impl Fn() + Send + Sync + 'static) -> Option<Media> {
         #[cfg(target_os = "linux")]
         if !session_bus_available() {
             log::info!("media keys unavailable: no D-Bus session bus");

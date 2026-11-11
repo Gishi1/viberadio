@@ -62,8 +62,10 @@ impl Tray {
     /// repaints promptly; the service itself runs on its own thread and never
     /// blocks the UI with D-Bus calls.
     pub fn start(state: TrayState, wake: impl Fn() + Send + Sync + 'static) -> Option<Tray> {
-        let (updates, update_rx) = mpsc::channel();
-        let (event_tx, events) = mpsc::channel();
+        // The Linux service consumes both receivers; other platforms drop them,
+        // so the element types must be explicit to stay inferable.
+        let (updates, update_rx) = mpsc::channel::<TrayState>();
+        let (event_tx, events) = mpsc::channel::<TrayEvent>();
         let sink = EventSink {
             tx: event_tx,
             wake: Arc::new(wake),
