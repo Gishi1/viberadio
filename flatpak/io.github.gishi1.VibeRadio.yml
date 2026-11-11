@@ -1,0 +1,41 @@
+app-id: io.github.gishi1.VibeRadio
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: viberadio
+finish-args:
+  - --share=network
+  - --socket=pulseaudio
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --own-name=org.kde.StatusNotifierItem-*
+  - --own-name=org.mpris.MediaPlayer2.viberadio
+modules:
+  - name: viberadio
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/viberadio/cargo
+    build-commands:
+      - cargo build --release --offline
+      - install -Dm755 target/release/viberadio /app/bin/viberadio
+      - install -Dm644 flatpak/io.github.gishi1.VibeRadio.desktop /app/share/applications/io.github.gishi1.VibeRadio.desktop
+      - install -Dm644 flatpak/io.github.gishi1.VibeRadio.metainfo.xml /app/share/metainfo/io.github.gishi1.VibeRadio.metainfo.xml
+      - install -Dm644 flatpak/io.github.gishi1.VibeRadio.svg /app/share/icons/hicolor/scalable/apps/io.github.gishi1.VibeRadio.svg
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - target
+          - dist
+          - artifacts
+          - .git
+          - docs/reviews
+          - flatpak/.flatpak-builder
+          - flatpak/build-dir
+      - cargo-sources.json

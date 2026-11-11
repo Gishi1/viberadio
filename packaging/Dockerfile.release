@@ -1,0 +1,19 @@
+FROM rust:1.86-bookworm
+
+# eframe/egui (winit + glow), rodio/cpal (ALSA), and the Debian packaging tools.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        pkg-config \
+        libasound2-dev \
+        libx11-dev \
+        libxcursor-dev \
+        libxrandr-dev \
+        libxi-dev \
+        libxkbcommon-dev \
+        libwayland-dev \
+        libgl1-mesa-dev \
+        libegl1-mesa-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+RUN packaging/build-deb.sh

@@ -1,0 +1,51 @@
+stages: [test, build, release]
+
+variables:
+  CARGO_TERM_COLOR: always
+
+default:
+  image: rust:1.86-bookworm
+  before_script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends
+        pkg-config libasound2-dev libxkbcommon-dev libwayland-dev
+        libx11-dev libgl1-mesa-dev
+  cache:
+    key: cargo
+    paths:
+      - .cargo/
+      - target/
+
+test:
+  stage: test
+  script:
+    - cargo test --locked
+
+build:
+  stage: build
+  script:
+    - ./scripts/release.sh --skip-tests
+  variables:
+    CARGO_BUILD_JOBS: "2"
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
+  rules:
+    - if: $CI_COMMIT_TAG
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  before_script: []
+  needs: [build]
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      release-cli create \
+        --name "VibeRadio ${CI_COMMIT_TAG#v}" \
+        --tag-name "$CI_COMMIT_TAG" \
+        --description "VibeRadio ${CI_COMMIT_TAG#v}" \
+        --assets-link "{\"name\":\"Linux tarball\",\"url\":\"${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/viberadio-${CI_COMMIT_TAG#v}-linux-x86_64.tar.gz?job=build\"}" \
+        --assets-link "{\"name\":\"SHA256SUMS\",\"url\":\"${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_TAG}/raw/dist/SHA256SUMS?job=build\"}"

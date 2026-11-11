@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=VibeRadio
+GenericName=Internet Radio
+Comment=Listen to internet radio stations
+Exec=viberadio
+TryExec=viberadio
+Icon=viberadio
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=radio;stream;music;internet;
+StartupWMClass=viberadio

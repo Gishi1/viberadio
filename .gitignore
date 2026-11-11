@@ -1,0 +1,23 @@
+/target
+/dist
+/artifacts
+/AppDir
+*.db
+*.db-journal
+*.sqlite
+*.fingerprint.json
+recordings/
+verified/
+*~
+.DS_Store
+
+# Flatpak build output
+.flatpak-builder/
+flatpak/.flatpak-builder/
+flatpak/build-dir/
+flatpak/repo/
+*.flatpak
+
+# Release artifacts
+*.tar.gz
+*.zip

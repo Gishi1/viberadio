@@ -1,0 +1,4 @@
+# Rust 1.86 cannot build the newest transitive dependencies of egui 0.29.
+# Prefer versions compatible with the toolchain when the lock file is refreshed.
+[resolver]
+incompatible-rust-versions = "fallback"

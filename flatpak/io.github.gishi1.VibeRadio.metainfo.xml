@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.gishi1.VibeRadio</id>
+  <name>VibeRadio</name>
+  <summary>Internet radio with recording and wishlists</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>VibeRadio is a native internet-radio client for Linux. It plays radio, keeps a searchable station library, records songs as separate files, identifies them with Chromaprint and AcoustID, builds a clean verified music tree, and watches stations for wishlist songs.</p>
+    <ul>
+      <li>Import stations from radio.net and radio-browser</li>
+      <li>Split recordings per song with live and scheduled boundaries</li>
+      <li>Fingerprint and identify recordings, with tagged verified copies</li>
+      <li>Wishlist rules, watched stations and a rolling pre-roll buffer</li>
+      <li>Favorites, sessions, schedules, mini player, tray and MPRIS</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.gishi1.VibeRadio.desktop</launchable>
+  <url type="homepage">https://github.com/Gishi1/viberadio</url>
+  <url type="bugtracker">https://github.com/Gishi1/viberadio/issues</url>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/Gishi1/viberadio/main/docs/screenshots/main.png</image>
+      <caption>Dark theme</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/Gishi1/viberadio/main/docs/screenshots/light.png</image>
+      <caption>Light theme</caption>
+    </screenshot>
+  </screenshots>
+  <releases>
+    <release version="0.1.0" date="2026-11-11"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

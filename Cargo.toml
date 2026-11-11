@@ -1,0 +1,99 @@
+[package]
+name = "viberadio"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.86"
+description = "Native internet radio client with recording, wishlists and a verified music library"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/Gishi1/viberadio"
+homepage = "https://github.com/Gishi1/viberadio"
+keywords = ["radio", "internet-radio", "recording", "egui", "music"]
+categories = ["multimedia::audio", "gui"]
+authors = ["VibeRadio contributors"]
+
+[dependencies]
+# GUI - eframe 0.29 builds on Rust 1.86 with the MSRV-aware resolver
+# (`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback` at lock time).
+eframe = "0.29"
+egui = "0.29"
+
+# Audio streaming - using reqwest with rustls (no native-tls/openssl)
+tokio = { version = "1.28", features = ["full"] }
+reqwest = { version = "0.11.23", features = ["stream", "rustls-tls"], default-features = false }
+tokio-stream = "0.1"
+
+# Audio playback - use cpal with default features (will need pkg-config/alsa)
+# NOTE: rodio depends on cpal which requires pkg-config/alsa on Linux
+rodio = "0.13"
+# Output-device enumeration and selection. cpal is already in the tree through
+# rodio; declaring it directly lets the app name its types without a re-export.
+cpal = "0.13"
+# Fallback decoder for AAC-LC (ADTS/MP4) and containers rodio 0.13 cannot read.
+# HE-AAC is expected to be degraded; Opus still needs a separate libopus backend.
+symphonia = { version = "0.5", default-features = false, features = ["aac", "mp3", "ogg", "flac", "isomp4"] }
+symphonia-codec-aac = "0.5"
+
+# Alternative: use symphonia for decoding without rodio's ALSA dependency
+# symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "flac"] }
+
+# Database
+rusqlite = { version = "0.28", features = ["bundled"] }
+
+# Audio fingerprinting for recordings. Chromaprint is pure Rust; AcoustID
+# lookup is optional and only runs when the user supplies a free API key.
+rusty-chromaprint = "0.3"
+base64 = "0.22"
+
+# Serialization
+serde = { version = "1.0.188", features = ["derive"] }
+serde_json = "1.0.104"
+
+# Logging
+log = "0.4.17"
+env_logger = "0.10.0"
+
+# UUID
+uuid = { version = "1.3.0", features = ["v4", "v5", "serde"] }
+
+# Time handling
+chrono = { version = "0.4.26", features = ["serde"] }
+
+# Reading system font collections to find a CJK fallback face. Already in the
+# tree through ab_glyph/epaint; declared directly for face enumeration.
+ttf-parser = "0.25"
+
+# Directory paths
+dirs = "4.0"
+
+# OS media keys and now-playing metadata: MPRIS on Linux over zbus (no
+# libdbus), System Media Transport Controls on Windows, Now Playing on macOS.
+souvlaki = { version = "0.8.3", default-features = false, features = ["use_zbus"] }
+id3 = "1.17.3"
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
+
+# Linux tray icon via StatusNotifierItem over D-Bus. Chosen over tray-icon
+# because it needs no GTK/AppIndicator build dependency; other platforms fall
+# back to no tray until a native implementation is added.
+[target.'cfg(unix)'.dependencies]
+# Already in the tree through cpal; declared directly for statvfs.
+libc = "0.2"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", features = ["blocking"] }
+# Already in the tree through souvlaki; declared directly so startup can ask
+# the session bus whether another window owns the MPRIS name.
+zbus = "3.15"
+
+# Pin problematic transitive dependencies
+[dependencies.url]
+version = "2.4.1"
+
+[dependencies.idna]
+version = "0.4.0"
+
+[profile.release]
+# Keep release builds within a normal desktop's memory budget. `lto` and
+# `codegen-units = 1` push the egui/wgpu stack over the OOM killer on 16 GB
+# machines; the default units and no LTO build reliably.
+strip = "symbols"
