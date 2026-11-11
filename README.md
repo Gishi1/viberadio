@@ -45,6 +45,8 @@ lives in a local SQLite database and a recordings folder.
   MPRIS media-key support on Linux.
 - ICY metadata in the stream bar, with artwork and album details from the
   iTunes Search API.
+- HLS (`.m3u8`) streams, including live playlists with AAC, MP3, MPEG-TS or
+  fragmented MP4 segments.
 
 ### Recording
 - Split recordings into one file per song, with a filename template.
@@ -215,7 +217,8 @@ release; GitLab builds the Linux artifact. See
 - Windows and macOS audio output is unverified. Hosted CI runners expose an
   output device that never consumes samples, so the playback tests are skipped
   there.
-- HLS (`.m3u8`) streams are not played.
+- HLS is supported for raw AAC/MP3, MPEG-TS and fragmented MP4 segments.
+  Encrypted playlists (`EXT-X-KEY`) are rejected.
 - AAC-LC is supported through symphonia; HE-AAC (SBR) and Opus are not fully
   decoded.
 - AcoustID identification needs an application key.

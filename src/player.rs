@@ -44,6 +44,7 @@ use uuid::Uuid;
 
 use crate::decode;
 use crate::dsp::{Dsp, DspPreset};
+use crate::hls;
 use crate::playlist;
 
 /// How many decoded samples a stream may buffer ahead (`f32`, interleaved) with
@@ -2819,6 +2820,10 @@ async fn fetch_stream(
                     if playlists > MAX_PLAYLIST_HOPS {
                         return Err("too many nested playlists".to_string());
                     }
+                    if hls::is_hls(&body) {
+                        log::info!("following an HLS playlist");
+                        return fetch_hls(owner, attempt, &url, body, shared, cancel, wake).await;
+                    }
                     url = playlist::next_stream(&body, &url)
                         .map_err(|e| format!("playlist: {e}"))?;
                     log::info!("resolved a playlist to its first stream");
@@ -2844,11 +2849,169 @@ async fn fetch_stream(
                 if playlists > MAX_PLAYLIST_HOPS {
                     return Err("too many nested playlists".to_string());
                 }
+                if hls::is_hls(&body) {
+                    log::info!("following an HLS playlist");
+                    return fetch_hls(owner, attempt, &url, body, shared, cancel, wake).await;
+                }
                 url = playlist::next_stream(&body, &url)
                     .map_err(|e| format!("playlist: {e}"))?;
                 log::info!("resolved a playlist to its first stream");
             }
         }
+    }
+}
+
+/// Follow an HLS playlist: fetch its segments in order and push the audio into
+/// the same buffer the decoder reads. Live playlists are reloaded until the
+/// stream ends, the download is cancelled, or the playlist stops advancing.
+async fn fetch_hls(
+    owner: &StreamShared,
+    attempt: u64,
+    start_url: &str,
+    first_body: Vec<u8>,
+    shared: &Shared,
+    cancel: &AtomicBool,
+    wake: &tokio::sync::Notify,
+) -> Result<FetchOutcome, String> {
+    let client = Client::builder()
+        .timeout(READ_STALL_TIMEOUT)
+        .build()
+        .map_err(|e| format!("cannot start HLS client: {e}"))?;
+
+    // The first body may be a master playlist that lists variants.
+    let (media_url, mut body) = match hls::master_variant(&first_body, start_url)? {
+        Some(variant) => {
+            let Some(bytes) =
+                hls_get(&client, &variant, hls::MAX_PLAYLIST_BYTES, cancel, wake).await?
+            else {
+                return Ok(FetchOutcome::Cancelled);
+            };
+            (variant, bytes)
+        }
+        None => (start_url.to_string(), first_body),
+    };
+
+    let mut next_sequence: Option<u64> = None;
+    let mut init_pushed = false;
+    let mut demux = IcyDemuxer::new(0);
+    let mut ts = crate::mpegts::TsDemuxer::new();
+    let mut total = 0usize;
+    let mut idle_reloads = 0u32;
+
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(FetchOutcome::Cancelled);
+        }
+        let playlist = hls::media_playlist(&body, &media_url)?;
+
+        if !init_pushed {
+            if let Some(init) = &playlist.init {
+                let Some(bytes) =
+                    hls_get(&client, init, hls::MAX_SEGMENT_BYTES, cancel, wake).await?
+                else {
+                    return Ok(FetchOutcome::Cancelled);
+                };
+                total += bytes.len();
+                if !push_demuxed(owner, attempt, shared, &mut demux, &bytes, cancel) {
+                    return Ok(FetchOutcome::Cancelled);
+                }
+            }
+            init_pushed = true;
+        }
+
+        let start = next_sequence.unwrap_or(playlist.media_sequence);
+        let mut fetched = 0usize;
+        for segment in playlist
+            .segments
+            .iter()
+            .filter(|segment| segment.sequence >= start)
+        {
+            if cancel.load(Ordering::SeqCst) {
+                return Ok(FetchOutcome::Cancelled);
+            }
+            let Some(bytes) =
+                hls_get(&client, &segment.url, hls::MAX_SEGMENT_BYTES, cancel, wake).await?
+            else {
+                return Ok(FetchOutcome::Cancelled);
+            };
+            total += bytes.len();
+            // MPEG-TS segments carry the audio in PES packets; raw AAC and MP3
+            // segments are passed through unchanged.
+            let mut elementary = Vec::new();
+            let audio: &[u8] = if ts.demux(&bytes, &mut elementary) {
+                &elementary
+            } else {
+                &bytes
+            };
+            if !audio.is_empty()
+                && !push_demuxed(owner, attempt, shared, &mut demux, audio, cancel)
+            {
+                return Ok(FetchOutcome::Cancelled);
+            }
+            next_sequence = Some(segment.sequence + 1);
+            fetched += 1;
+        }
+
+        if playlist.end_list {
+            break;
+        }
+        idle_reloads = if fetched == 0 { idle_reloads + 1 } else { 0 };
+        if idle_reloads > 60 {
+            return Err("HLS playlist stopped producing segments".to_string());
+        }
+
+        // Live playlist: wait about half a target duration, then reload.
+        let wait = Duration::from_millis(u64::from(playlist.target_duration.max(1)) * 500);
+        if !sleep_hls(wait, cancel, wake).await {
+            return Ok(FetchOutcome::Cancelled);
+        }
+        let Some(bytes) =
+            hls_get(&client, &media_url, hls::MAX_PLAYLIST_BYTES, cancel, wake).await?
+        else {
+            return Ok(FetchOutcome::Cancelled);
+        };
+        body = bytes;
+    }
+
+    Ok(FetchOutcome::Done(total))
+}
+
+/// GET a playlist or segment, returning `None` when cancelled.
+async fn hls_get(
+    client: &Client,
+    url: &str,
+    limit: usize,
+    cancel: &AtomicBool,
+    wake: &tokio::sync::Notify,
+) -> Result<Option<Vec<u8>>, String> {
+    if cancel.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let response = tokio::select! {
+        _ = wake.notified() => return Ok(None),
+        result = client.get(url).send() => result.map_err(|e| format!("HLS request failed: {e}"))?,
+    };
+    if !response.status().is_success() {
+        return Err(format!("HLS request returned {}", response.status()));
+    }
+    let body = tokio::select! {
+        _ = wake.notified() => return Ok(None),
+        result = response.bytes() => result.map_err(|e| format!("HLS body failed: {e}"))?,
+    };
+    if body.len() > limit {
+        return Err(format!("HLS response exceeded {limit} bytes"));
+    }
+    Ok(Some(body.to_vec()))
+}
+
+/// Sleep, returning false when the download was cancelled.
+async fn sleep_hls(duration: Duration, cancel: &AtomicBool, wake: &tokio::sync::Notify) -> bool {
+    if cancel.load(Ordering::SeqCst) {
+        return false;
+    }
+    tokio::select! {
+        _ = wake.notified() => false,
+        _ = tokio::time::sleep(duration) => !cancel.load(Ordering::SeqCst),
     }
 }
 
@@ -3837,12 +4000,39 @@ mod tests {
     }
 
     #[test]
-    fn hls_playlists_are_reported_as_unsupported() {
-        let body: &'static [u8] = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXTINF:10,\nseg1.aac\n";
+    fn hls_live_playlist_without_endlist_keeps_reloading() {
+        // A live playlist has no ENDLIST; the fetch must follow it rather than
+        // reject it. A cancelled fetch stops promptly.
+        let body: &'static [u8] = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1,\nseg1.aac\n";
         let list = serve_file(body, "application/vnd.apple.mpegurl");
 
-        let error = fetch_error(&format!("http://{list}/radio.m3u8"));
-        assert!(error.contains("HLS"), "{error}");
+        let buffer = new_shared();
+        let request = PlayRequest::new(format!("http://{list}/live.m3u8"));
+        let owner = StreamShared::new(
+            1,
+            &request,
+            None,
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(DspPreset::Off as u32)),
+        );
+        let attempt = owner.begin_attempt();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let fetch = runtime.block_on(async {
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                fetch_stream(&owner, &buffer, &request.url, &cancel, &wake, attempt),
+            )
+            .await
+        });
+        // Still running after two seconds means it is polling the live playlist.
+        assert!(fetch.is_err(), "live HLS playlist ended unexpectedly");
+        cancel.store(true, Ordering::SeqCst);
+        wake.notify_one();
     }
 
     /// A playlist that points at itself must stop instead of looping forever.
@@ -3905,11 +4095,20 @@ mod tests {
     /// so, because the body marker is enough.
     #[test]
     fn hls_is_detected_from_the_body_without_a_hint() {
-        let body: &'static [u8] = b"#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:10,\nseg1.aac\n";
+        let wav: &'static [u8] = Box::leak(make_wav(1).into_boxed_slice());
+        let segment = serve_file(wav, "audio/aac");
+        let body: &'static [u8] = Box::leak(
+            format!(
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nhttp://{segment}/seg.aac\n#EXT-X-ENDLIST\n"
+            )
+            .into_bytes()
+            .into_boxed_slice(),
+        );
         let list = serve_file(body, "application/octet-stream");
 
-        let error = fetch_error(&format!("http://{list}/listen"));
-        assert!(error.contains("HLS"), "{error}");
+        let (outcome, data, _) = fetch_to_end(&format!("http://{list}/listen"));
+        assert!(matches!(outcome, FetchOutcome::Done(_)));
+        assert_eq!(data, wav);
     }
 
     #[test]
@@ -3943,6 +4142,52 @@ mod tests {
         let list = serve_file(body, "audio/x-mpegurl");
 
         let (outcome, data, _) = fetch_to_end(&format!("http://{list}/radio.m3u"));
+        assert!(matches!(outcome, FetchOutcome::Done(_)));
+        assert_eq!(data, wav);
+    }
+
+    /// An HLS media playlist must play every segment in order.
+    #[test]
+    fn hls_media_playlist_plays_its_segments() {
+        let wav: &'static [u8] = Box::leak(make_wav(1).into_boxed_slice());
+        let segment = serve_file(wav, "audio/aac");
+        let body: &'static [u8] = Box::leak(
+            format!(
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:9\n#EXTINF:4.0,\nhttp://{segment}/seg-9.aac\n#EXT-X-ENDLIST\n"
+            )
+            .into_bytes()
+            .into_boxed_slice(),
+        );
+        let list = serve_file(body, "application/vnd.apple.mpegurl");
+
+        let (outcome, data, _) = fetch_to_end(&format!("http://{list}/live.m3u8"));
+        assert!(matches!(outcome, FetchOutcome::Done(_)));
+        assert_eq!(data, wav);
+    }
+
+    /// A master playlist must be reduced to one variant before segments load.
+    #[test]
+    fn hls_master_playlist_picks_a_variant() {
+        let wav: &'static [u8] = Box::leak(make_wav(1).into_boxed_slice());
+        let segment = serve_file(wav, "audio/aac");
+        let media: &'static [u8] = Box::leak(
+            format!(
+                "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nhttp://{segment}/seg.aac\n#EXT-X-ENDLIST\n"
+            )
+            .into_bytes()
+            .into_boxed_slice(),
+        );
+        let playlist = serve_file(media, "application/vnd.apple.mpegurl");
+        let master: &'static [u8] = Box::leak(
+            format!(
+                "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=64000\nhttp://{playlist}/low.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=128000\nhttp://{playlist}/high.m3u8\n"
+            )
+            .into_bytes()
+            .into_boxed_slice(),
+        );
+        let entry = serve_file(master, "application/vnd.apple.mpegurl");
+
+        let (outcome, data, _) = fetch_to_end(&format!("http://{entry}/master.m3u8"));
         assert!(matches!(outcome, FetchOutcome::Done(_)));
         assert_eq!(data, wav);
     }
@@ -4908,6 +5153,66 @@ mod tests {
             st.eof || st.error.is_some(),
             "cancelled download left the buffer open"
         );
+    }
+
+    /// Live HLS smoke test: pull one real MPEG-TS segment and demux its audio.
+    ///
+    /// Ignored by default because it needs outbound network. Run with
+    /// `cargo test -- --ignored live_hls_segment_demuxes`.
+    #[test]
+    #[ignore = "needs outbound network"]
+    fn live_hls_segment_demuxes() {
+        const MASTER: &str = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let client = Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap();
+            let cancel = AtomicBool::new(false);
+            let wake = tokio::sync::Notify::new();
+            let master = hls_get(
+                &client,
+                MASTER,
+                hls::MAX_PLAYLIST_BYTES,
+                &cancel,
+                &wake,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let variant = hls::master_variant(&master, MASTER).unwrap().unwrap();
+            let media = hls_get(
+                &client,
+                &variant,
+                hls::MAX_PLAYLIST_BYTES,
+                &cancel,
+                &wake,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let playlist = hls::media_playlist(&media, &variant).unwrap();
+            let segment = hls_get(
+                &client,
+                &playlist.segments[0].url,
+                hls::MAX_SEGMENT_BYTES,
+                &cancel,
+                &wake,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let mut demuxer = crate::mpegts::TsDemuxer::new();
+            let mut audio = Vec::new();
+            assert!(demuxer.demux(&segment, &mut audio), "not MPEG-TS");
+            assert!(audio.len() > 1_000, "no audio extracted");
+            assert_eq!(audio[0], 0xff, "audio does not start with ADTS sync");
+            assert_eq!(audio[1] & 0xf0, 0xf0);
+        });
     }
 
     /// Live-station smoke test: the one thing every fixture cannot prove.

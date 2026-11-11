@@ -5,9 +5,8 @@
 //! response is a playlist, and if so which URL to fetch instead. Parsing is
 //! pure, so the rules are covered by offline tests.
 //!
-//! HLS (`.m3u8` media playlists) is detected and reported as unsupported rather
-//! than followed: it is a separate input path with segment fetching, not a
-//! simple indirection to one stream.
+//! HLS (`.m3u8` media playlists) is detected here but followed by the HLS path
+//! in [`crate::player`]: it needs segment fetching, not a single indirection.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,7 +22,7 @@ pub const SNIFF_BYTES: usize = 64;
 pub enum Kind {
     M3u,
     Pls,
-    /// HLS media playlist. Recognised so the caller can report it clearly.
+    /// HLS playlist. Followed by the HLS path in [`crate::player`].
     Hls,
 }
 
@@ -40,7 +39,7 @@ impl fmt::Display for Kind {
 /// Why a body could not be turned into a stream URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// The body is an HLS playlist, which this player does not support.
+    /// The body is an HLS playlist; the HLS path in [`crate::player`] handles it.
     Hls,
     /// The playlist parsed but holds no HTTP(S) entry.
     Empty,
@@ -51,7 +50,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Hls => f.write_str("HLS playlists are not supported yet"),
+            Error::Hls => f.write_str("HLS playlist must be followed by the HLS path"),
             Error::Empty => f.write_str("playlist contains no HTTP stream URL"),
             Error::TooLarge => f.write_str("playlist is too large"),
         }
