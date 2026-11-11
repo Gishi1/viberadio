@@ -47,6 +47,7 @@ lives in a local SQLite database and a recordings folder.
   iTunes Search API.
 - HLS (`.m3u8`) streams, including live playlists with AAC, MP3, MPEG-TS or
   fragmented MP4 segments.
+- MP3, AAC-LC, Ogg Vorbis, Ogg Opus, FLAC and WAV playback.
 
 ### Recording
 - Split recordings into one file per song, with a filename template.
@@ -219,8 +220,7 @@ release; GitLab builds the Linux artifact. See
   there.
 - HLS is supported for raw AAC/MP3, MPEG-TS and fragmented MP4 segments.
   Encrypted playlists (`EXT-X-KEY`) are rejected.
-- AAC-LC is supported through symphonia; HE-AAC (SBR) and Opus are not fully
-  decoded.
+- AAC-LC and Ogg Opus are supported; HE-AAC (SBR) is not decoded.
 - AcoustID identification needs an application key.
 - The `verified/` tree selects the best complete airing; it does not stitch a
   missing intro or outro from several airings yet.

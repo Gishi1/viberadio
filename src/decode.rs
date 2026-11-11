@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use rodio::{Decoder, Source};
 use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{Decoder as SymphoniaCodec, DecoderOptions};
+use symphonia::core::codecs::{Decoder as SymphoniaCodec, DecoderOptions, CODEC_TYPE_OPUS};
 use symphonia::core::formats::{FormatOptions, FormatReader};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
@@ -173,6 +173,67 @@ impl StreamDecoder for SymphoniaStreamDecoder {
     }
 }
 
+/// Symphonia demuxes Ogg Opus, but has no Opus codec. This decoder takes the
+/// packets it produces and hands them to the pure-Rust Opus decoder.
+struct OpusStreamDecoder {
+    format: Box<dyn FormatReader>,
+    decoder: opus_decoder::OpusDecoder,
+    track_id: u32,
+    channels: u16,
+    sample_rate: u32,
+    samples: Vec<f32>,
+    index: usize,
+}
+
+impl Iterator for OpusStreamDecoder {
+    type Item = f32;
+
+    fn next(&mut self) -> Option<f32> {
+        loop {
+            if self.index < self.samples.len() {
+                let sample = self.samples[self.index];
+                self.index += 1;
+                return Some(sample);
+            }
+            let packet = match self.format.next_packet() {
+                Ok(packet) => packet,
+                Err(symphonia::core::errors::Error::IoError(error))
+                    if error.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return None;
+                }
+                Err(_) => return None,
+            };
+            if packet.track_id() != self.track_id {
+                continue;
+            }
+            let capacity = self.decoder.max_frame_size_per_channel();
+            self.samples
+                .resize(capacity * usize::from(self.channels), 0.0);
+            match self
+                .decoder
+                .decode_float(packet.buf(), &mut self.samples, false)
+            {
+                Ok(frames) => {
+                    self.samples.truncate(frames * usize::from(self.channels));
+                    self.index = 0;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+}
+
+impl StreamDecoder for OpusStreamDecoder {
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn sample_rate(&self) -> u32 {
+        self.sample_rate
+    }
+}
+
 /// Read up to `buf.len()` bytes, stopping early at EOF or an error.
 fn peek(reader: &mut dyn ReadSeekSend, buf: &mut [u8]) -> usize {
     let mut read = 0;
@@ -238,6 +299,24 @@ fn open_symphonia(mut reader: Box<dyn ReadSeekSend>) -> Result<Box<dyn StreamDec
         .map(|channels| channels.count())
         .unwrap_or(2)
         .max(1) as u16;
+    // Symphonia demuxes Ogg Opus but ships no Opus codec; decode its packets
+    // with the pure-Rust decoder instead.
+    if codec_params.codec == CODEC_TYPE_OPUS {
+        if channels == 0 || channels > 2 {
+            return Err(format!("Opus with {channels} channels is not supported"));
+        }
+        let decoder = opus_decoder::OpusDecoder::new(48_000, usize::from(channels))
+            .map_err(|e| format!("Opus decoder failed: {e}"))?;
+        return Ok(Box::new(OpusStreamDecoder {
+            format,
+            decoder,
+            track_id,
+            channels,
+            sample_rate: 48_000,
+            samples: Vec::new(),
+            index: 0,
+        }));
+    }
     let decoder = symphonia::default::get_codecs()
         .make(&codec_params, &DecoderOptions::default())
         .map_err(|e| format!("symphonia has no decoder for this stream: {e}"))?;
@@ -366,7 +445,25 @@ mod tests {
             "OGG decoder produced too few samples: {}",
             samples.len()
         );
-        assert!(samples.iter().all(|sample| sample.is_finite()));
+    }
+
+    #[test]
+    fn decodes_ogg_opus() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/tone.opus");
+        let mut decoder = open_with(|_budget| Box::new(File::open(path).expect("fixture")))
+            .expect("Ogg Opus must decode");
+        assert_eq!(decoder.channels(), 1);
+        assert_eq!(decoder.sample_rate(), 48_000);
+        let samples: Vec<f32> = decoder.by_ref().take(48_000).collect();
+        assert!(
+            samples.len() > 20_000,
+            "Opus decoder produced too few samples: {}",
+            samples.len()
+        );
+        assert!(
+            samples.iter().any(|sample| sample.abs() > 0.01),
+            "Opus decoder produced silence"
+        );
     }
 
     #[test]

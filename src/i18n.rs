@@ -404,7 +404,7 @@ const EN: &[(&str, &str)] = &[
     ("about.formats", "Formats"),
     (
         "about.formats_text",
-        "MP3, OGG Vorbis, FLAC and WAV via rodio; AAC-LC via symphonia. HE-AAC is expected to fail or play degraded, Opus needs libopus, and HLS is deferred.",
+        "MP3, OGG Vorbis, FLAC and WAV via rodio; AAC-LC and Ogg Opus via symphonia and a pure-Rust decoder. HE-AAC is expected to fail or play degraded. Unencrypted HLS playlists are followed.",
     ),
     ("about.boost", "Dynamic Boost"),
     (

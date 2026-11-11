@@ -33,6 +33,8 @@ cpal = "0.13"
 # HE-AAC is expected to be degraded; Opus still needs a separate libopus backend.
 symphonia = { version = "0.5", default-features = false, features = ["aac", "mp3", "ogg", "flac", "isomp4"] }
 symphonia-codec-aac = "0.5"
+# Pure-Rust Opus decoder. Symphonia demuxes Ogg Opus but ships no Opus codec.
+opus-decoder = "0.1"
 
 # Alternative: use symphonia for decoding without rodio's ALSA dependency
 # symphonia = { version = "0.5", features = ["mp3", "aac", "ogg", "flac"] }
