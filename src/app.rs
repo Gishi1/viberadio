@@ -4685,6 +4685,16 @@ impl VibeRadioApp {
                         ui.strong(t("about.boost"));
                         ui.label(t("about.boost_text"));
                         ui.separator();
+                        ui.strong(t("about.support"));
+                        ui.label(t("about.support_text"));
+                        if ui.button(t("about.kofi")).clicked() {
+                            if let Err(e) = crate::system::open_path(std::path::Path::new(
+                                "https://ko-fi.com/gishi",
+                            )) {
+                                log::warn!("cannot open the Ko-fi page: {e}");
+                            }
+                        }
+                        ui.separator();
                         ui.label(tf("about.data", &[&data]));
                         ui.label(tf("about.database", &[&database]));
                         ui.label(tf("about.schema", &[&schema]));

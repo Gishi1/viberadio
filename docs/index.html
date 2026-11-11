@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>VibeRadio — internet radio, recording and wishlists</title>
+    <meta
+      name="description"
+      content="VibeRadio is a native internet-radio player for Linux, Windows and macOS. Record and identify songs, build a verified music library, and catch wishlist tracks with watched stations."
+    >
+    <meta name="theme-color" content="#16181C">
+    <link rel="icon" href="icon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="site.css">
+    <link rel="canonical" href="https://gishi1.github.io/viberadio/">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://gishi1.github.io/viberadio/">
+    <meta property="og:title" content="VibeRadio — radio that keeps what you hear">
+    <meta
+      property="og:description"
+      content="A native internet-radio player that records songs, identifies them, and builds a clean music library. Wishlists, watched stations, HLS and Opus."
+    >
+    <meta property="og:image" content="https://gishi1.github.io/viberadio/screenshots/main.png">
+    <meta name="twitter:card" content="summary_large_image">
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="site-header">
+      <div class="nav">
+        <a class="brand" href="#top">
+          <img src="icon.svg" alt="" width="34" height="34">
+          VibeRadio
+        </a>
+        <nav class="nav-links" aria-label="Main">
+          <a href="#features">Features</a>
+          <a href="#screenshots">Screenshots</a>
+          <a href="#install">Install</a>
+          <a href="https://github.com/Gishi1/viberadio">GitHub</a>
+          <a class="nav-kofi" href="https://ko-fi.com/gishi">Ko-fi</a>
+          <a class="btn btn-primary" href="https://github.com/Gishi1/viberadio/releases/latest">Download</a>
+        </nav>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero" id="top">
+        <div>
+          <span class="eyebrow">Beta · Linux, Windows and macOS</span>
+          <h1>Radio that <span class="accent">keeps</span> what you hear.</h1>
+          <p class="lead">
+            A native internet-radio player that records songs, identifies them,
+            and builds a clean music library — with wishlists and watched
+            stations that catch the track you almost missed.
+          </p>
+          <div class="actions">
+            <a class="btn btn-primary" href="https://github.com/Gishi1/viberadio/releases/latest">Download</a>
+            <a class="btn btn-ghost" href="https://github.com/Gishi1/viberadio">View on GitHub</a>
+            <a class="btn btn-kofi" href="https://ko-fi.com/gishi">Support on Ko-fi</a>
+          </div>
+          <div class="trust">
+            <span>No account</span>
+            <span>No telemetry</span>
+            <span>Local SQLite library</span>
+            <span>MIT licensed</span>
+          </div>
+        </div>
+        <div class="shot">
+          <img
+            src="screenshots/main.png"
+            alt="VibeRadio dark theme playing a station, with the stream bar and station list"
+            width="1204"
+            height="838"
+          >
+        </div>
+      </section>
+
+      <section class="section" id="features">
+        <div class="section-head">
+          <h2>Built for listening, not for browsing.</h2>
+          <p class="sub">
+            A Rust core and an egui interface, with no browser engine in the
+            middle. Everything stays on your machine.
+          </p>
+        </div>
+        <div class="features">
+          <article class="feature">
+            <div class="icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M13 2 4.5 12h5L9 22l8.5-10h-5L13 2z" />
+              </svg>
+            </div>
+            <h3>Native, not a browser</h3>
+            <p>
+              Written in Rust with egui. No WebView, no Electron, no account.
+              It starts instantly and stays light.
+            </p>
+          </article>
+
+          <article class="feature">
+            <div class="icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+                <circle cx="12" cy="12" r="8" />
+                <circle cx="12" cy="12" r="3" fill="currentColor" stroke="none" />
+              </svg>
+            </div>
+            <h3>Records every song</h3>
+            <p>
+              Split recordings per track, name them from a template, and set a
+              minimum length so ads and chatter are dropped.
+            </p>
+          </article>
+
+          <article class="feature">
+            <div class="icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
+                <path d="m9 13 2 2 4-4" />
+              </svg>
+            </div>
+            <h3>A verified library</h3>
+            <p>
+              Chromaprint and AcoustID identify complete airings and file them
+              under artist and album, ready for any player.
+            </p>
+          </article>
+
+          <article class="feature">
+            <div class="icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+                <path d="M12 20s-7-4.4-7-9.2A4 4 0 0 1 12 8a4 4 0 0 1 7 2.8C19 15.6 12 20 12 20z" />
+              </svg>
+            </div>
+            <h3>Wishlists that listen</h3>
+            <p>
+              Add the songs you want. VibeRadio watches your stations and
+              records a wish when it airs.
+            </p>
+          </article>
+
+          <article class="feature">
+            <div class="icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+                <path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12z" />
+                <circle cx="12" cy="12" r="2.6" />
+              </svg>
+            </div>
+            <h3>Watched stations</h3>
+            <p>
+              Keep a rolling buffer on selected stations, so a song that starts
+              just before you notice is still caught from the beginning.
+            </p>
+          </article>
+
+          <article class="feature">
+            <div class="icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round">
+                <circle cx="12" cy="12" r="2" fill="currentColor" stroke="none" />
+                <path d="M7.5 7.5a6.4 6.4 0 0 0 0 9M16.5 7.5a6.4 6.4 0 0 1 0 9" />
+              </svg>
+            </div>
+            <h3>Modern stream formats</h3>
+            <p>
+              ICY, HLS and Ogg Opus, plus AAC-LC, MP3, Vorbis, FLAC and WAV.
+              Encrypted HLS is reported clearly.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="screenshots">
+        <div class="section-head">
+          <h2>Dark by default. Light when you want it.</h2>
+          <p class="sub">
+            One window for playback, recording, the verified library and the
+            wishlist — with a compact mini player and a tray icon.
+          </p>
+        </div>
+        <div class="shots">
+          <figure>
+            <img
+              src="screenshots/main.png"
+              alt="VibeRadio dark theme with the station list, stream bar and recording controls"
+              width="1204"
+              height="838"
+              loading="lazy"
+            >
+            <figcaption>Dark theme</figcaption>
+          </figure>
+          <figure>
+            <img
+              src="screenshots/light.png"
+              alt="VibeRadio light theme with the same layout"
+              width="1204"
+              height="838"
+              loading="lazy"
+            >
+            <figcaption>Light theme</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section" id="install">
+        <div class="section-head">
+          <h2>Install in a minute.</h2>
+          <p class="sub">
+            Download a build from the releases page. Linux also has a Flatpak
+            manifest in the repository.
+          </p>
+        </div>
+        <div class="install">
+          <article class="platform">
+            <h3>Linux</h3>
+            <p class="meta">AppImage · tarball · Flatpak</p>
+            <p>
+              The AppImage is one file and needs no install. The tarball
+              includes the desktop entry, icon and AppStream metadata.
+            </p>
+            <pre><code>chmod +x viberadio-*.AppImage
+./viberadio-*.AppImage</code></pre>
+            <a class="btn btn-primary" href="https://github.com/Gishi1/viberadio/releases/latest">Linux downloads</a>
+          </article>
+
+          <article class="platform">
+            <h3>Windows</h3>
+            <p class="meta">Windows 10 and 11 · x86_64</p>
+            <p>
+              Unzip and run <code>viberadio.exe</code>. SmartScreen may warn
+              about an unsigned build; choose <strong>More info → Run anyway</strong>.
+            </p>
+            <a class="btn btn-primary" href="https://github.com/Gishi1/viberadio/releases/latest">Windows download</a>
+          </article>
+
+          <article class="platform">
+            <h3>macOS</h3>
+            <p class="meta">Apple Silicon and Intel</p>
+            <p>
+              Extract the tarball and run the binary. Clear the quarantine flag
+              if macOS refuses to open it.
+            </p>
+            <pre><code>xattr -d com.apple.quarantine viberadio</code></pre>
+            <a class="btn btn-primary" href="https://github.com/Gishi1/viberadio/releases/latest">macOS downloads</a>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="support">
+        <div class="support">
+          <div>
+            <h2>Free, open source, and ad-free.</h2>
+            <p>
+              VibeRadio is MIT licensed and has no accounts, ads or telemetry.
+              If it earns a place in your day, you can support development on
+              Ko-fi.
+            </p>
+          </div>
+          <a class="btn btn-kofi" href="https://ko-fi.com/gishi">Support on Ko-fi</a>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="foot">
+        <span>© 2026 VibeRadio · MIT License</span>
+        <nav aria-label="Footer">
+          <a href="https://github.com/Gishi1/viberadio">GitHub</a>
+          <a href="https://gitlab.com/Gishi1/viberadio">GitLab</a>
+          <a href="https://github.com/Gishi1/viberadio/releases">Releases</a>
+          <a href="https://ko-fi.com/gishi">Ko-fi</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

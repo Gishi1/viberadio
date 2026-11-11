@@ -411,6 +411,12 @@ const EN: &[(&str, &str)] = &[
         "about.boost_text",
         "A fixed slow-RMS AGC, per-station trim and -1 dBFS peak limiter. It is not EBU R128 or ReplayGain.",
     ),
+    ("about.support", "Support"),
+    (
+        "about.support_text",
+        "VibeRadio is free and open source. If it is useful to you, you can support development on Ko-fi.",
+    ),
+    ("about.kofi", "Support on Ko-fi"),
     ("about.data", "Data folder: {}"),
     ("about.database", "Database: {}"),
     ("about.schema", "Schema: {}"),
