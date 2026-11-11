@@ -3637,6 +3637,10 @@ mod tests {
                 let Ok(mut c) = conn else { break };
                 let mut request = [0u8; 1024];
                 let _ = c.read(&mut request);
+                // The record-only test attaches its recorder just after
+                // play_stream; a real stream cannot deliver audio before that.
+                // Give the attach a moment so the test is not a race.
+                thread::sleep(Duration::from_millis(100));
                 let _ = c.write_all(
                     b"HTTP/1.0 200 OK\r\nContent-Type: audio/mpeg\r\nicy-metaint: 4\r\nConnection: close\r\n\r\n",
                 );
@@ -4484,7 +4488,7 @@ mod tests {
             thread::sleep(Duration::from_millis(20));
         }
         let summary = summary.expect("the record-only stream did not finish");
-        assert_eq!(summary.files, 3);
+        assert_eq!(summary.files, 3, "summary: {summary:?}");
         assert_eq!(
             std::fs::read(dir.join("Artist One - Song One.bin")).unwrap(),
             b"PRE!AAAA"
