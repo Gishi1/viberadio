@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/banner.svg" alt="VibeRadio — internet radio, recording and wishlists for Linux" width="100%">
+  <img src="docs/banner.svg" alt="VibeRadio — internet radio, recording and wishlists" width="100%">
 </p>
 
 <p align="center">
@@ -12,15 +12,20 @@
 </p>
 
 <p align="center">
+  <a href="https://gishi1.github.io/viberadio/"><strong>Website</strong></a> ·
   <a href="https://github.com/Gishi1/viberadio">GitHub</a> ·
-  <a href="https://gitlab.com/Gishi1/viberadio">GitLab</a>
+  <a href="https://gitlab.com/Gishi1/viberadio">GitLab</a> ·
+  <a href="https://github.com/Gishi1/viberadio/releases">Releases</a>
 </p>
 
-**VibeRadio** is a native internet-radio client for Linux, written in Rust with
-[egui](https://github.com/emilk/egui). It plays radio, keeps a searchable
-library, records songs as separate files, identifies them with Chromaprint and
-AcoustID, builds a clean `verified/` music tree, and watches stations for songs
-on your wishlist.
+**VibeRadio** is a native internet-radio client for Linux, Windows and macOS,
+written in Rust with [egui](https://github.com/emilk/egui). It plays radio,
+keeps a searchable library, records songs as separate files, identifies them
+with Chromaprint and AcoustID, builds a clean `verified/` music tree, and
+watches stations for songs on your wishlist.
+
+The landing page, with screenshots and download links, is at
+**[gishi1.github.io/viberadio](https://gishi1.github.io/viberadio/)**.
 
 There is no WebView, no Electron layer, no account and no telemetry. Everything
 lives in a local SQLite database and a recordings folder.
