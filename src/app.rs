@@ -3432,12 +3432,12 @@ impl VibeRadioApp {
     }
 
     fn want_current_track(&mut self) {
-        let Some(raw) = self
-            .player
-            .snapshot()
-            .active
-            .and_then(|stream| stream.now_playing)
-        else {
+        let engine = self.player.snapshot();
+        // Use the immediate title for the wish, not the catalog display title.
+        let raw = selected_stream(&engine, self.selected_station)
+            .or_else(|| engine.active.as_ref())
+            .and_then(|stream| stream.now_playing.clone());
+        let Some(raw) = raw else {
             self.last_message = Some(t("msg.no_track").to_string());
             return;
         };
@@ -5111,12 +5111,14 @@ fn recording_summary_message(summary: &RecordedSummary) -> String {
 }
 
 /// The now-playing label for the selected station, never another stream's.
-fn selected_now_playing<'a>(
+/// The stream that represents the selected station: the active playback first,
+/// then its background watch stream, then any stream for that station.
+fn selected_stream<'a>(
     engine: &'a crate::player::EngineSnapshot,
     selected: Option<Uuid>,
-) -> Option<&'a str> {
+) -> Option<&'a crate::player::StreamSnapshot> {
     let selected = selected?;
-    let stream = engine
+    engine
         .active
         .as_ref()
         .filter(|stream| stream.station_id == Some(selected))
@@ -5133,11 +5135,20 @@ fn selected_now_playing<'a>(
                 .streams
                 .iter()
                 .find(|stream| stream.station_id == Some(selected))
-        })?;
-    stream
-        .display_now_playing
-        .as_deref()
-        .or(stream.now_playing.as_deref())
+        })
+}
+
+fn selected_now_playing<'a>(
+    engine: &'a crate::player::EngineSnapshot,
+    selected: Option<Uuid>,
+) -> Option<&'a str> {
+    selected_stream(engine, selected)
+        .and_then(|stream| {
+            stream
+                .display_now_playing
+                .as_deref()
+                .or(stream.now_playing.as_deref())
+        })
         .filter(|title| !title.trim().is_empty())
 }
 
