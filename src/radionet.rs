@@ -214,7 +214,11 @@ fn clean(value: &Option<String>) -> Option<String> {
 }
 
 fn format_rank(format: &str) -> Option<u8> {
-    match format.to_ascii_uppercase().as_str() {
+    let upper = format.to_ascii_uppercase();
+    if upper.starts_with("HLS") {
+        return Some(4);
+    }
+    match upper.as_str() {
         "MP3" => Some(0),
         "AAC" | "AAC+" => Some(1),
         "FLAC" => Some(2),
@@ -225,7 +229,7 @@ fn format_rank(format: &str) -> Option<u8> {
 
 fn is_http_audio_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
-    (lower.starts_with("http://") || lower.starts_with("https://")) && !lower.contains(".m3u8")
+    lower.starts_with("http://") || lower.starts_with("https://")
 }
 
 /// Fetch a default station set from radio.net. Blocking; call from a worker.
@@ -426,22 +430,31 @@ mod tests {
           ]
         }"#;
         let seeds = parse_page(json).0;
-        assert_eq!(seeds.len(), 2);
-        let seed = &seeds[0];
-        assert_eq!(seed.name, "Jazz FM");
-        assert_eq!(seed.genre.as_deref(), Some("Jazz"));
-        assert_eq!(seed.country.as_deref(), Some("UK"));
-        assert_eq!(seed.city.as_deref(), Some("London"));
-        assert_eq!(seed.logo.as_deref(), Some("https://img.example/jazz.png"));
-        assert_eq!(seed.tags.as_deref(), Some("Music"));
-        assert_eq!(seed.codec.as_deref(), Some("MP3"));
+        assert_eq!(seeds.len(), 3);
+        let by_name = |name: &str| {
+            seeds
+                .iter()
+                .find(|seed| seed.name == name)
+                .unwrap_or_else(|| panic!("{name} must be kept"))
+        };
+
+        let jazz = by_name("Jazz FM");
+        assert_eq!(jazz.genre.as_deref(), Some("Jazz"));
+        assert_eq!(jazz.country.as_deref(), Some("UK"));
+        assert_eq!(jazz.city.as_deref(), Some("London"));
+        assert_eq!(jazz.logo.as_deref(), Some("https://img.example/jazz.png"));
+        assert_eq!(jazz.tags.as_deref(), Some("Music"));
+        assert_eq!(jazz.codec.as_deref(), Some("MP3"));
 
         // MP3 is preferred over AAC, and the extra genre goes to tags.
-        let preferred = &seeds[1];
-        assert_eq!(preferred.name, "MP3 wins");
+        let preferred = by_name("MP3 wins");
         assert_eq!(preferred.url, "https://a.example/prefer-mp3");
         assert_eq!(preferred.genre.as_deref(), Some("Rock"));
         assert_eq!(preferred.tags.as_deref(), Some("Indie, Music"));
+
+        // HLS is playable now. The second HLS entry shares this URL, so it is
+        // dropped as a duplicate rather than as an unsupported format.
+        assert_eq!(by_name("HLS only").url, "https://a.example/live.m3u8");
     }
 
     #[test]

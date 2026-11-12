@@ -388,7 +388,15 @@ pub fn render_streams(ui: &mut egui::Ui, theme: &Theme, rows: &[StreamRow]) -> V
                         },
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui
+                        if row.watching {
+                            // The app recreates a watched station's background
+                            // stream, so a stop button here would do nothing.
+                            ui.label(
+                                egui::RichText::new(t("player.watching"))
+                                    .size(11.0)
+                                    .color(theme.text_disabled),
+                            );
+                        } else if ui
                             .small_button("■")
                             .on_hover_text(t("player.stop_stream"))
                             .clicked()

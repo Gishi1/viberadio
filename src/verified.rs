@@ -205,12 +205,17 @@ fn verified_path(root: &Path, artist: &str, album: &str, title: &str, extension:
         .join(format!("{artist} - {title}.{extension}"))
 }
 
+/// Cut a name to a byte budget on a character boundary, so multi-byte titles
+/// cannot exceed the filesystem's 255-byte filename limit.
 fn short(value: &str, limit: usize) -> String {
-    if value.chars().count() <= limit {
-        value.to_string()
-    } else {
-        value.chars().take(limit).collect()
+    if value.len() <= limit {
+        return value.to_string();
     }
+    let mut end = limit;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].trim_end().to_string()
 }
 
 fn tag_file(path: &Path, sidecar: &Sidecar, artwork: Option<&[u8]>) -> Result<(), String> {
@@ -384,9 +389,9 @@ mod tests {
     #[test]
     fn long_names_are_shortened() {
         let artist = "A".repeat(200);
-        let title = "B".repeat(300);
+        let title = "曲".repeat(300);
         let path = verified_path(Path::new("/music"), &artist, "Album", &title, "mp3");
         let name = path.file_name().unwrap().to_string_lossy();
-        assert!(name.len() < 255);
+        assert!(name.len() < 255, "name is {} bytes", name.len());
     }
 }

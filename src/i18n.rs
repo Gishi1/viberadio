@@ -164,6 +164,7 @@ const EN: &[(&str, &str)] = &[
     ("player.stop_all", "Stop playback"),
     ("player.stop_all_tooltip", "Stop playback; recordings keep running"),
     ("player.stop_stream", "Stop this stream"),
+    ("player.watching", "Watching"),
     ("player.activate_stream", "Make this stream active"),
     ("player.play_selected", "Play the selected station"),
     ("player.restart_selected", "Restart the selected station"),

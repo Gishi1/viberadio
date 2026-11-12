@@ -136,6 +136,8 @@ pub struct StreamRow {
     pub recording: bool,
     /// A record-only stream; it has no playback controls.
     pub record_only: bool,
+    /// A background stream kept alive for a watched station.
+    pub watching: bool,
 }
 
 /// A user intent collected from the panels and applied by the app afterwards.

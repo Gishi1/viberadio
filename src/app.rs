@@ -4358,6 +4358,7 @@ impl VibeRadioApp {
                     active: engine.active.as_ref().map(|active| active.id) == Some(stream.id),
                     recording: stream.recording,
                     record_only: stream.record_only,
+                    watching: stream.watching,
                 }
             })
             .collect()
@@ -6526,16 +6527,9 @@ impl eframe::App for VibeRadioApp {
                             ui.separator();
                             ui.strong(t("settings.fingerprinting"));
                             ui.label(t("settings.acoustid_key"));
-                            let key_response =
-                                ui.text_edit_singleline(&mut self.acoustid_api_key);
-                            if key_response.changed() {
-                                if let Some(db) = &self.db {
-                                    let _ = db.set_setting(
-                                        "acoustid_api_key",
-                                        self.acoustid_api_key.trim(),
-                                    );
-                                }
-                            }
+                            // Persisted on Save or when the window closes; a
+                            // write per keystroke would fsync on every character.
+                            ui.text_edit_singleline(&mut self.acoustid_api_key);
                             ui.label(
                                 egui::RichText::new(t("settings.acoustid_note"))
                                     .size(12.0)

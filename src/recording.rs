@@ -780,7 +780,20 @@ pub fn render_name(template: &str, station: &str, track: &str, started: DateTime
     if name.trim().is_empty() {
         name = "recording".to_string();
     }
-    sanitize(&name)
+    truncate_name(&sanitize(&name), 200)
+}
+
+/// Keep a rendered name inside the 255-byte filename limit on every supported
+/// filesystem, cutting on a character boundary.
+fn truncate_name(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].trim_end().to_string()
 }
 
 /// Template tokens that [`render_name`] does not replace.
@@ -1420,5 +1433,20 @@ mod tests {
         let name = render_name("{artist} - {title}", "Station", "A/B - C?", Local::now());
         assert_eq!(name, "A_B - C_");
         assert!(!name.contains('/'));
+    }
+
+    #[test]
+    fn long_names_are_shortened() {
+        let track = format!("{} - {}", "A".repeat(300), "B".repeat(300));
+        let name = render_name("{artist} - {title}", "Station", &track, Local::now());
+        assert!(name.len() <= 200, "name is {} bytes", name.len());
+    }
+
+    #[test]
+    fn multibyte_names_are_shortened_on_a_boundary() {
+        let track = format!("{} - {}", "曲".repeat(200), "歌".repeat(200));
+        let name = render_name("{artist} - {title}", "Station", &track, Local::now());
+        assert!(name.len() <= 200);
+        assert!(!name.is_empty());
     }
 }

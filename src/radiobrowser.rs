@@ -1,8 +1,8 @@
 //! radio-browser.info station directory.
 //!
 //! The community directory is free and unauthenticated. It returns one stream
-//! URL per station, so HLS-only and broken entries are filtered out here; the
-//! player cannot decode HLS yet.
+//! URL per station; broken entries are filtered out, and HLS entries are kept
+//! because the player follows HLS playlists.
 
 use std::collections::HashSet;
 use std::time::Duration;
@@ -31,7 +31,6 @@ struct ApiStation {
     language: Option<String>,
     codec: Option<String>,
     bitrate: Option<i64>,
-    hls: Option<i32>,
     lastcheckok: Option<i32>,
 }
 
@@ -47,7 +46,7 @@ pub fn parse_stations(json: &str) -> Vec<StationSeed> {
     let mut seen = HashSet::new();
     let mut seeds = Vec::new();
     for station in stations {
-        if station.hls.unwrap_or(0) != 0 || station.lastcheckok.unwrap_or(1) != 1 {
+        if station.lastcheckok.unwrap_or(1) != 1 {
             continue;
         }
         let url = station
@@ -120,9 +119,7 @@ fn split_tags(tags: Option<&str>) -> Vec<String> {
 
 fn is_playable_url(url: &str) -> bool {
     let lower = url.to_ascii_lowercase();
-    (lower.starts_with("http://") || lower.starts_with("https://"))
-        && !lower.contains(".m3u8")
-        && url.len() <= 2048
+    (lower.starts_with("http://") || lower.starts_with("https://")) && url.len() <= 2048
 }
 
 /// Fetch the most-clicked stations. Blocking; call from a worker.
@@ -162,7 +159,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parser_maps_fields_and_skips_hls_broken_and_duplicate_entries() {
+    fn parser_maps_fields_and_skips_broken_and_duplicate_entries() {
         let json = r#"[
           {
             "stationuuid": "uuid-1",
@@ -205,8 +202,11 @@ mod tests {
           }
         ]"#;
         let seeds = parse_stations(json);
-        assert_eq!(seeds.len(), 1);
-        let seed = &seeds[0];
+        assert_eq!(seeds.len(), 2);
+        let seed = seeds
+            .iter()
+            .find(|seed| seed.name == "Jazz FM")
+            .expect("Jazz FM must be kept");
         assert_eq!(seed.source_id.as_deref(), Some("uuid-1"));
         assert_eq!(seed.name, "Jazz FM");
         assert_eq!(seed.url, "https://stream.example/jazz.mp3");
@@ -220,6 +220,11 @@ mod tests {
             .tags
             .as_deref()
             .is_some_and(|tags| tags.contains("smooth") && tags.contains("english")));
+        let hls = seeds
+            .iter()
+            .find(|seed| seed.name == "HLS only")
+            .expect("HLS stations must be kept");
+        assert_eq!(hls.url, "https://stream.example/live.m3u8");
     }
 
     #[test]
@@ -234,7 +239,6 @@ mod tests {
         let seeds = fetch_stations().expect("radio-browser must answer");
         println!("radio-browser returned {} stations", seeds.len());
         assert!(seeds.len() > 1000);
-        assert!(seeds.iter().all(|seed| !seed.url.contains(".m3u8")));
         assert!(seeds
             .iter()
             .all(|seed| seed.website.is_some() || seed.source_id.is_some()));

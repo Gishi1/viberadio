@@ -265,9 +265,11 @@ pub fn lookup_acoustid(
             .build()
             .map_err(|e| e.to_string())?;
         let duration = duration_seconds.to_string();
+        // A compressed fingerprint is several kilobytes; a GET query overflows
+        // the server's request-line limit (nginx returns 400 at about 8 KiB).
         let response = client
-            .get(ACOUSTID_URL)
-            .query(&[
+            .post(ACOUSTID_URL)
+            .form(&[
                 ("client", api_key),
                 ("format", "json"),
                 ("meta", "recordings releasegroups"),
