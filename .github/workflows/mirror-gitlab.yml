@@ -1,0 +1,31 @@
+name: Mirror to GitLab
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Push branch or tag to GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "GITLAB_TOKEN is not set; skipping the GitLab mirror." >&2
+            exit 0
+          fi
+          git remote add gitlab "https://oauth2:${GITLAB_TOKEN}@gitlab.com/Gishi1/viberadio.git"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            git push gitlab "refs/tags/${GITHUB_REF_NAME}"
+          else
+            git push gitlab "HEAD:refs/heads/master"
+          fi
