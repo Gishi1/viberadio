@@ -6808,12 +6808,15 @@ impl eframe::App for VibeRadioApp {
 
         if self.ui.show_metadata_debug {
             let mut open = true;
-            let active = engine.active.as_ref();
-            let station_id = active.and_then(|stream| stream.station_id);
+            // Follow the selected station, including its background watch
+            // stream, not just whichever stream is playing.
+            let stream = selected_stream(&engine, self.selected_station)
+                .or_else(|| engine.active.as_ref());
+            let station_id = stream.and_then(|stream| stream.station_id);
             let station_name = station_id
                 .and_then(|id| self.stations.iter().find(|station| station.id == id))
                 .map(|station| station.name.clone());
-            let raw = active
+            let raw = stream
                 .and_then(|stream| stream.now_playing.as_deref())
                 .unwrap_or(t("debug.none"));
             // Start editing from the stored format when the station changes.
@@ -6852,7 +6855,7 @@ impl eframe::App for VibeRadioApp {
                     ));
                     ui.label(tf(
                         "debug.status",
-                        &[active
+                        &[stream
                             .map(|stream| stream.status_text.as_str())
                             .unwrap_or(t("debug.idle"))],
                     ));
@@ -6920,9 +6923,9 @@ impl eframe::App for VibeRadioApp {
                     ));
                     ui.label(tf(
                         "debug.url",
-                        &[active.map(|stream| stream.url.as_str()).unwrap_or("—")],
+                        &[stream.map(|stream| stream.url.as_str()).unwrap_or("—")],
                     ));
-                    if let Some(error) = active.and_then(|stream| stream.error.as_deref()) {
+                    if let Some(error) = stream.and_then(|stream| stream.error.as_deref()) {
                         ui.colored_label(ui.visuals().error_fg_color, error);
                     }
                     ui.separator();
