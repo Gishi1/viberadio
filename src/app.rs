@@ -5112,17 +5112,33 @@ fn recording_summary_message(summary: &RecordedSummary) -> String {
 
 /// The now-playing label for the selected station, never another stream's.
 fn selected_now_playing<'a>(
-    active: Option<&'a crate::player::StreamSnapshot>,
+    engine: &'a crate::player::EngineSnapshot,
     selected: Option<Uuid>,
 ) -> Option<&'a str> {
-    active
-        .filter(|stream| stream.station_id == selected)
-        .and_then(|stream| {
-            stream
-                .display_now_playing
-                .as_deref()
-                .or(stream.now_playing.as_deref())
+    let selected = selected?;
+    let stream = engine
+        .active
+        .as_ref()
+        .filter(|stream| stream.station_id == Some(selected))
+        // A watched station usually runs as a background record-only stream,
+        // which is never the active playback. Its title still belongs here.
+        .or_else(|| {
+            engine
+                .streams
+                .iter()
+                .find(|stream| stream.station_id == Some(selected) && stream.watching)
         })
+        .or_else(|| {
+            engine
+                .streams
+                .iter()
+                .find(|stream| stream.station_id == Some(selected))
+        })?;
+    stream
+        .display_now_playing
+        .as_deref()
+        .or(stream.now_playing.as_deref())
+        .filter(|title| !title.trim().is_empty())
 }
 
 /// The app's own history first, then provider entries not already listed, so
@@ -7152,8 +7168,7 @@ impl eframe::App for VibeRadioApp {
             self.playlist_fetch.is_some() && playlist.is_none() && playlist_error.is_none();
         // The panel describes the selected station, so it must not borrow the
         // title of a different stream that happens to be playing.
-        let selected_now_playing =
-            selected_now_playing(engine.active.as_ref(), self.selected_station);
+        let selected_now_playing = selected_now_playing(&engine, self.selected_station);
         egui::SidePanel::right("now-playing")
             .resizable(true)
             .default_width(280.0)
@@ -7709,12 +7724,38 @@ mod switch_tests {
         let mut stream = snapshot(1);
         stream.station_id = Some(station);
         stream.now_playing = Some("Title".into());
+        let engine = crate::player::EngineSnapshot {
+            revision: 0,
+            active: Some(stream),
+            streams: Vec::new(),
+        };
+        assert_eq!(selected_now_playing(&engine, Some(station)), Some("Title"));
+        assert_eq!(selected_now_playing(&engine, Some(other)), None);
+        let empty = crate::player::EngineSnapshot {
+            revision: 0,
+            active: None,
+            streams: Vec::new(),
+        };
+        assert_eq!(selected_now_playing(&empty, Some(station)), None);
+    }
+
+    #[test]
+    fn the_panel_falls_back_to_a_watch_stream() {
+        let station = Uuid::new_v4();
+        let mut watch = snapshot(2);
+        watch.station_id = Some(station);
+        watch.watching = true;
+        watch.record_only = true;
+        watch.now_playing = Some("Watch Song".into());
+        let engine = crate::player::EngineSnapshot {
+            revision: 0,
+            active: None,
+            streams: vec![watch],
+        };
         assert_eq!(
-            selected_now_playing(Some(&stream), Some(station)),
-            Some("Title")
+            selected_now_playing(&engine, Some(station)),
+            Some("Watch Song")
         );
-        assert_eq!(selected_now_playing(Some(&stream), Some(other)), None);
-        assert_eq!(selected_now_playing(None, Some(station)), None);
     }
 
     #[test]
