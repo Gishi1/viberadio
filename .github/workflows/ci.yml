@@ -18,6 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.86.0"
+          components: rustfmt, clippy
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -32,3 +33,30 @@ jobs:
             libwayland-dev libx11-dev libgl1-mesa-dev
       - name: Run tests
         run: cargo test --locked
+      - name: Release build
+        if: runner.os == 'Linux'
+        run: cargo build --locked --release
+
+  lint:
+    name: Lint (advisory)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.86.0"
+          components: rustfmt, clippy
+      - name: Install Linux dependencies
+        run: |
+          if [ -f /etc/apt/apt-mirrors.txt ]; then
+            sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get update -o Acquire::Retries=5
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+            build-essential pkg-config libasound2-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libgl1-mesa-dev
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings

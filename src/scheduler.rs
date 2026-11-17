@@ -698,6 +698,36 @@ impl SchedulerRuntime {
         })
     }
 
+    /// Drop windows whose schedule was deleted or disabled, or whose station is
+    /// gone. Returns the `Stop` effects for the caller to apply.
+    pub fn retain_valid(
+        &mut self,
+        schedules: &[Schedule],
+        known_stations: &HashSet<Uuid>,
+    ) -> Vec<SchedulerEffect> {
+        let mut stopped = Vec::new();
+        let mut keep = Vec::new();
+        for window in self.active.drain(..) {
+            let valid = known_stations.contains(&window.station_id)
+                && schedules
+                    .iter()
+                    .any(|schedule| schedule.id == window.schedule_id && schedule.enabled);
+            if valid {
+                keep.push(window);
+            } else {
+                stopped.push(SchedulerEffect::Stop {
+                    schedule_id: window.schedule_id,
+                    station_id: window.station_id,
+                    playback_id: window.playback_id,
+                    owns_stream: window.owns_stream,
+                    owns_recording: window.owns_recording,
+                });
+            }
+        }
+        self.active = keep;
+        stopped
+    }
+
     /// Evaluate every schedule and close windows that have ended.
     pub fn tick(
         &mut self,
@@ -1384,6 +1414,59 @@ mod tests {
             ] if *stopped == station_id
         ));
         assert_eq!(runtime.active_count(), 0);
+    }
+
+    #[test]
+    fn retain_valid_stops_a_disabled_window() {
+        let station_id = Uuid::new_v4();
+        let mut value = schedule(
+            Recurrence::Once,
+            naive(2026, 11, 8, 7, 0),
+            Some(naive(2026, 11, 8, 8, 0)),
+        );
+        value.station_id = station_id;
+        let known = HashSet::from([station_id]);
+        let mut runtime = SchedulerRuntime::new();
+        runtime.tick(
+            &[value.clone()],
+            &known,
+            utc(2026, 11, 8, 7, 30),
+            &resolve_utc,
+        );
+        runtime.attach(value.id, Some(7), true, true);
+        value.enabled = false;
+        let stopped = runtime.retain_valid(&[value], &known);
+        assert_eq!(runtime.active_count(), 0);
+        assert!(matches!(
+            stopped.as_slice(),
+            [SchedulerEffect::Stop {
+                playback_id: Some(7),
+                owns_stream: true,
+                owns_recording: true,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn retain_valid_keeps_an_enabled_window() {
+        let station_id = Uuid::new_v4();
+        let mut value = schedule(
+            Recurrence::Once,
+            naive(2026, 11, 8, 7, 0),
+            Some(naive(2026, 11, 8, 8, 0)),
+        );
+        value.station_id = station_id;
+        let known = HashSet::from([station_id]);
+        let mut runtime = SchedulerRuntime::new();
+        runtime.tick(
+            &[value.clone()],
+            &known,
+            utc(2026, 11, 8, 7, 30),
+            &resolve_utc,
+        );
+        assert!(runtime.retain_valid(&[value], &known).is_empty());
+        assert_eq!(runtime.active_count(), 1);
     }
 
     #[test]

@@ -3,6 +3,7 @@
 
 mod app;
 mod bitrate;
+mod coordinator;
 mod database;
 mod decode;
 mod desktop;

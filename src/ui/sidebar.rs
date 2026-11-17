@@ -5,7 +5,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Rect, Sense};
 use crate::i18n::t;
 
 use super::theme::Theme;
-use super::{Action, LibraryFilter, LibraryStats, UiState, SIDEBAR_ITEM_HEIGHT};
+use super::{space, text, Action, LibraryFilter, LibraryStats, UiState, SIDEBAR_ITEM_HEIGHT};
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -41,12 +41,8 @@ pub fn render(
     });
     ui.add_space(10.0);
 
-    // Leave room for the action footer, and scroll if the genre list is long.
-    // The footer is drawn after the scroll area, so this must cover its natural
-    // height: separator, spacing, one 20 px row per action, and a little slack.
-    const FOOTER_ACTIONS: usize = 6;
-    const FOOTER_ITEM_HEIGHT: f32 = 20.0;
-    let footer_height = 52.0 + FOOTER_ACTIONS as f32 * (FOOTER_ITEM_HEIGHT + 1.0);
+    // Reserve room for the footer menu (space + separator + button).
+    let footer_height = 64.0;
     let scroll_height = (ui.available_height() - footer_height).max(120.0);
     egui::ScrollArea::vertical()
         .id_salt("sidebar-scroll")
@@ -100,6 +96,8 @@ pub fn render(
             {
                 state.filter = LibraryFilter::Watched;
             }
+            ui.add_space(space::M);
+            section_label(ui, theme, t("sidebar.app"));
             if item(ui, theme, t("sidebar.sessions"), None, false).clicked() {
                 actions.push(Action::OpenSessions);
             }
@@ -112,6 +110,8 @@ pub fn render(
             if item(ui, theme, t("sidebar.watch_history"), None, false).clicked() {
                 actions.push(Action::OpenWatchHistory);
             }
+            ui.add_space(space::M);
+            section_label(ui, theme, t("sidebar.more"));
             if item(ui, theme, t("sidebar.settings"), None, false).clicked() {
                 actions.push(Action::OpenSettings);
             }
@@ -144,45 +144,48 @@ pub fn render(
             ui.spacing_mut().item_spacing.y = old_spacing;
         });
 
-    ui.add_space(4.0);
+    ui.add_space(space::XS);
     ui.separator();
-    ui.add_space(4.0);
-    let old_spacing = ui.spacing().item_spacing.y;
-    ui.spacing_mut().item_spacing.y = 1.0;
-
-    if footer_item(ui, theme, t("sidebar.add_station")).clicked() {
-        actions.push(Action::OpenAddStation);
-    }
-    if footer_item(ui, theme, t("sidebar.import_radionet")).clicked() {
-        actions.push(Action::ImportRadioNet);
-    }
-    if footer_item(ui, theme, t("sidebar.import_radiobrowser")).clicked() {
-        actions.push(Action::ImportRadioBrowser);
-    }
-    if footer_item(ui, theme, t("sidebar.export_m3u")).clicked() {
-        actions.push(Action::ExportPlaylist);
-    }
-    if footer_item(ui, theme, t("sidebar.import_m3u")).clicked() {
-        actions.push(Action::ImportPlaylist);
-    }
-    if footer_item(ui, theme, t("sidebar.export_history")).clicked() {
-        actions.push(Action::ExportHistory);
-    }
-    ui.spacing_mut().item_spacing.y = old_spacing;
-
+    ui.add_space(space::XS);
+    ui.menu_button(t("sidebar.actions"), |ui| {
+        if ui.button(t("sidebar.add_station")).clicked() {
+            actions.push(Action::OpenAddStation);
+            ui.close_menu();
+        }
+        if ui.button(t("sidebar.import_radionet")).clicked() {
+            actions.push(Action::ImportRadioNet);
+            ui.close_menu();
+        }
+        if ui.button(t("sidebar.import_radiobrowser")).clicked() {
+            actions.push(Action::ImportRadioBrowser);
+            ui.close_menu();
+        }
+        if ui.button(t("sidebar.export_m3u")).clicked() {
+            actions.push(Action::ExportPlaylist);
+            ui.close_menu();
+        }
+        if ui.button(t("sidebar.import_m3u")).clicked() {
+            actions.push(Action::ImportPlaylist);
+            ui.close_menu();
+        }
+        if ui.button(t("sidebar.export_history")).clicked() {
+            actions.push(Action::ExportHistory);
+            ui.close_menu();
+        }
+    });
     actions
 }
 
 fn section_label(ui: &mut egui::Ui, theme: &Theme, label: &str) {
     ui.horizontal(|ui| {
-        ui.add_space(16.0);
+        ui.add_space(space::L);
         ui.label(
-            egui::RichText::new(label)
-                .size(12.0)
+            egui::RichText::new(label.to_uppercase())
+                .size(text::SECTION)
                 .color(theme.text_secondary),
         );
     });
-    ui.add_space(2.0);
+    ui.add_space(space::XS);
 }
 
 fn item(
@@ -199,7 +202,7 @@ fn item(
     let fill = if active {
         theme.bg_row_selected
     } else if hovered {
-        theme.bg_row_alt
+        theme.bg_hover
     } else {
         Color32::TRANSPARENT
     };
@@ -219,36 +222,20 @@ fn item(
         theme.text_primary
     };
     ui.painter().text(
-        egui::pos2(rect.left() + 16.0, rect.center().y),
+        egui::pos2(rect.left() + space::L, rect.center().y),
         Align2::LEFT_CENTER,
         label,
-        FontId::proportional(14.0),
+        FontId::proportional(text::BODY),
         text_color,
     );
     if let Some(count) = count {
         ui.painter().text(
-            egui::pos2(rect.right() - 16.0, rect.center().y),
+            egui::pos2(rect.right() - space::L, rect.center().y),
             Align2::RIGHT_CENTER,
             count.to_string(),
-            FontId::monospace(12.0),
+            FontId::monospace(text::CAPTION),
             theme.text_secondary,
         );
     }
-    response
-}
-
-fn footer_item(ui: &mut egui::Ui, theme: &Theme, label: &str) -> egui::Response {
-    let width = ui.available_width();
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 20.0), Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(rect, 0.0, theme.bg_row_alt);
-    }
-    ui.painter().text(
-        egui::pos2(rect.left() + 16.0, rect.center().y),
-        Align2::LEFT_CENTER,
-        label,
-        FontId::proportional(13.0),
-        theme.text_secondary,
-    );
     response
 }

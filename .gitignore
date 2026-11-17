@@ -21,3 +21,6 @@ flatpak/repo/
 # Release artifacts
 *.tar.gz
 *.zip
+
+# Local review notes
+/reviews

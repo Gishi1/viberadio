@@ -14,9 +14,11 @@ pub struct Theme {
     pub bg_player: Color32,
     pub bg_row: Color32,
     pub bg_row_alt: Color32,
+    pub bg_hover: Color32,
     pub bg_row_selected: Color32,
     pub bg_row_playing: Color32,
     pub border: Color32,
+    pub focus_ring: Color32,
     pub text_primary: Color32,
     pub text_secondary: Color32,
     pub text_disabled: Color32,
@@ -43,9 +45,11 @@ impl Theme {
             bg_player: rgb(0x1F, 0x23, 0x2A),
             bg_row: rgb(0x16, 0x18, 0x1C),
             bg_row_alt: rgb(0x1A, 0x1D, 0x23),
-            bg_row_selected: rgb(0x23, 0x28, 0x33),
-            bg_row_playing: rgb(0x1E, 0x2A, 0x32),
+            bg_hover: rgb(0x1E, 0x22, 0x2A),
+            bg_row_selected: rgb(0x21, 0x33, 0x31),
+            bg_row_playing: rgb(0x1B, 0x26, 0x33),
             border: rgb(0x2A, 0x2F, 0x38),
+            focus_ring: rgb(0x3F, 0xB6, 0xA8),
             text_primary: rgb(0xE6, 0xE9, 0xEF),
             text_secondary: rgb(0x9A, 0xA3, 0xB2),
             text_disabled: rgb(0x5C, 0x64, 0x70),
@@ -65,9 +69,11 @@ impl Theme {
             bg_player: rgb(0xFF, 0xFF, 0xFF),
             bg_row: rgb(0xF7, 0xF8, 0xFA),
             bg_row_alt: rgb(0xF1, 0xF3, 0xF7),
-            bg_row_selected: rgb(0xE3, 0xE8, 0xF0),
-            bg_row_playing: rgb(0xE6, 0xF4, 0xF1),
+            bg_hover: rgb(0xE9, 0xED, 0xF3),
+            bg_row_selected: rgb(0xD9, 0xEF, 0xEA),
+            bg_row_playing: rgb(0xE4, 0xED, 0xF8),
             border: rgb(0xD8, 0xDD, 0xE5),
+            focus_ring: rgb(0x1F, 0x8A, 0x7C),
             text_primary: rgb(0x1B, 0x1F, 0x26),
             text_secondary: rgb(0x5C, 0x64, 0x70),
             text_disabled: rgb(0x8A, 0x92, 0x9E),
@@ -89,22 +95,36 @@ impl Theme {
         visuals.window_fill = self.bg_player;
         visuals.extreme_bg_color = self.bg_sidebar;
         visuals.faint_bg_color = self.bg_row_alt;
-        visuals.override_text_color = Some(self.text_primary);
-        visuals.selection.bg_fill = self.accent_muted;
-        visuals.selection.stroke = egui::Stroke::new(1.0, self.accent);
+        visuals.override_text_color = None;
+        visuals.selection.bg_fill = self.bg_row_selected;
+        visuals.selection.stroke = egui::Stroke::new(1.0, self.focus_ring);
+        visuals.hyperlink_color = self.accent;
         visuals.widgets.noninteractive.bg_fill = self.bg_sidebar;
         visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, self.border);
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
         visuals.widgets.inactive.bg_fill = self.bg_row_alt;
         visuals.widgets.inactive.weak_bg_fill = self.bg_row_alt;
-        visuals.widgets.hovered.bg_fill = self.bg_row_selected;
-        visuals.widgets.hovered.weak_bg_fill = self.bg_row_selected;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, self.border);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
+        visuals.widgets.hovered.bg_fill = self.bg_hover;
+        visuals.widgets.hovered.weak_bg_fill = self.bg_hover;
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, self.accent_muted);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
         visuals.widgets.active.bg_fill = self.bg_row_selected;
         visuals.widgets.active.weak_bg_fill = self.bg_row_selected;
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, self.focus_ring);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, self.text_primary);
+        let rounding = egui::Rounding::same(4.0);
+        visuals.widgets.noninteractive.rounding = rounding;
+        visuals.widgets.inactive.rounding = rounding;
+        visuals.widgets.hovered.rounding = rounding;
+        visuals.widgets.active.rounding = rounding;
         ctx.set_visuals(visuals);
 
         let mut style = (*ctx.style()).clone();
-        style.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(8.0, 4.0);
+        style.spacing.interact_size.y = 28.0;
         style.spacing.slider_width = 96.0;
         style.text_styles = [
             (

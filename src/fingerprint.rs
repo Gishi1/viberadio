@@ -515,7 +515,12 @@ pub fn scan_recordings(dir: &Path, api_key: Option<&str>) -> Result<FingerprintR
     let paths: Vec<PathBuf> = entries
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_file() && is_audio(path) && !sidecar_path(path).exists())
+        .filter(|path| {
+            path.is_file()
+                && is_audio(path)
+                && !sidecar_path(path).exists()
+                && !crate::recording::incomplete_marker(path).exists()
+        })
         .collect();
     fingerprint_paths(&paths, api_key)
 }

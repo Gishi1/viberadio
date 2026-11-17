@@ -7,7 +7,7 @@ use crate::models::Station;
 use crate::station_playlist::StationPlaylist;
 
 use super::theme::Theme;
-use super::Action;
+use super::{ghost_button, paint_clipped_text, section_header, space, text, Action};
 
 pub fn render(
     ui: &mut egui::Ui,
@@ -19,51 +19,54 @@ pub fn render(
     loading: bool,
     actions: &mut Vec<Action>,
 ) {
+    // Now playing: header, title, station, action.
+    section_header(ui, theme, t("panel.now_playing"));
+    ui.add_space(space::XS);
+    ui.label(
+        egui::RichText::new(now_playing.unwrap_or("—"))
+            .size(text::HEADING)
+            .strong()
+            .color(if now_playing.is_some() {
+                theme.text_primary
+            } else {
+                theme.text_disabled
+            }),
+    );
     if let Some(station) = station {
         ui.label(
             egui::RichText::new(&station.name)
-                .size(14.0)
-                .color(theme.text_primary),
-        );
-        ui.add_space(6.0);
-    }
-
-    ui.label(
-        egui::RichText::new(t("panel.now_playing"))
-            .size(11.0)
-            .color(theme.text_secondary),
-    );
-    ui.add_space(2.0);
-    ui.label(
-        egui::RichText::new(now_playing.unwrap_or("—"))
-            .size(14.0)
-            .color(theme.text_primary),
-    );
-    if now_playing.is_some() {
-        ui.add_space(4.0);
-        if ui.small_button(t("panel.want_this")).clicked() {
-            actions.push(Action::WantCurrent);
-        }
-    }
-    ui.add_space(10.0);
-    ui.separator();
-    ui.add_space(6.0);
-
-    if let Some(next) = playlist.and_then(|playlist| playlist.next.as_ref()) {
-        ui.label(
-            egui::RichText::new(t("panel.up_next"))
-                .size(11.0)
+                .size(text::CAPTION)
                 .color(theme.text_secondary),
         );
-        ui.add_space(2.0);
+    }
+    ui.add_space(space::S);
+    ui.horizontal(|ui| {
+        if now_playing.is_some()
+            && ui.add(ghost_button(t("panel.want_this"), theme)).clicked()
+        {
+            actions.push(Action::WantCurrent);
+        }
+        if let Some(station) = station {
+            if ui.add(ghost_button(t("panel.info"), theme)).clicked() {
+                actions.push(Action::OpenStationInfo(station.id));
+            }
+        }
+    });
+    ui.add_space(space::M);
+    ui.separator();
+    ui.add_space(space::S);
+
+    if let Some(next) = playlist.and_then(|playlist| playlist.next.as_ref()) {
+        section_header(ui, theme, t("panel.up_next"));
+        ui.add_space(space::XS);
         ui.horizontal_wrapped(|ui| {
             ui.label(
                 egui::RichText::new(entry_text(next))
-                    .size(13.0)
+                    .size(text::CAPTION)
                     .color(theme.text_primary),
             );
             if ui
-                .small_button("+")
+                .add(ghost_button("+", theme))
                 .on_hover_text(t("panel.want_this"))
                 .clicked()
             {
@@ -73,54 +76,59 @@ pub fn render(
                 });
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(space::S);
     }
 
     ui.horizontal(|ui| {
-        ui.label(
-            egui::RichText::new(t("panel.recently_played"))
-                .size(11.0)
-                .color(theme.text_secondary),
-        );
-        if ui.small_button(t("panel.refresh")).clicked() {
-            actions.push(Action::RefreshPlaylist);
-        }
+        section_header(ui, theme, t("panel.recently_played"));
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui
+                .add(ghost_button("↻", theme))
+                .on_hover_text(t("panel.refresh"))
+                .clicked()
+            {
+                actions.push(Action::RefreshPlaylist);
+            }
+        });
     });
-    ui.add_space(4.0);
+    ui.add_space(space::XS);
 
     if let Some(error) = error {
+        empty_state(ui, theme, t("panel.no_track_history"));
         ui.label(
             egui::RichText::new(tf("panel.playlist_failed", &[error]))
-                .size(12.0)
-                .color(theme.text_secondary),
+                .size(text::CAPTION)
+                .color(theme.danger),
         );
         return;
     }
     if loading {
         ui.label(
             egui::RichText::new(t("panel.playlist_loading"))
-                .size(12.0)
+                .size(text::CAPTION)
                 .color(theme.text_secondary),
         );
         return;
     }
     let Some(playlist) = playlist else {
-        let key = if station.is_some() {
-            "panel.playlist_empty"
+        let (title, body) = if station.is_some() {
+            (t("panel.no_track_history"), t("panel.playlist_empty"))
         } else {
-            "panel.select_station"
+            (t("panel.nothing_selected"), t("panel.select_station"))
         };
+        empty_state(ui, theme, title);
         ui.label(
-            egui::RichText::new(t(key))
-                .size(12.0)
+            egui::RichText::new(body)
+                .size(text::CAPTION)
                 .color(theme.text_secondary),
         );
         return;
     };
     if playlist.entries.is_empty() {
+        empty_state(ui, theme, t("panel.no_track_history"));
         ui.label(
             egui::RichText::new(t("panel.playlist_empty"))
-                .size(12.0)
+                .size(text::CAPTION)
                 .color(theme.text_secondary),
         );
         return;
@@ -129,32 +137,69 @@ pub fn render(
     egui::ScrollArea::vertical()
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            for entry in &playlist.entries {
-                ui.horizontal_wrapped(|ui| {
-                    if let Some(at) = &entry.at {
-                        ui.label(
-                            egui::RichText::new(display_time(at))
-                                .size(11.0)
-                                .color(theme.text_secondary),
-                        );
-                    }
-                    ui.label(
-                        egui::RichText::new(entry_text(entry))
-                            .size(12.0)
-                            .color(theme.text_primary),
+            for (index, entry) in playlist.entries.iter().enumerate() {
+                let width = ui.available_width();
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(width, 28.0), egui::Sense::hover());
+                if response.hovered() {
+                    ui.painter().rect_filled(rect, 4.0, theme.bg_hover);
+                }
+                let mut left = rect.left() + space::S;
+                if let Some(at) = &entry.at {
+                    let time = display_time(at);
+                    let galley = ui.painter().layout_no_wrap(
+                        time,
+                        egui::FontId::monospace(text::CAPTION),
+                        theme.text_disabled,
                     );
-                    if ui
-                        .small_button("+")
-                        .on_hover_text(t("panel.want_this"))
-                        .clicked()
-                    {
+                    left += galley.size().x + space::S;
+                    ui.painter().galley(
+                        egui::pos2(
+                            rect.left() + space::S,
+                            rect.center().y - galley.size().y / 2.0,
+                        ),
+                        galley,
+                        theme.text_disabled,
+                    );
+                }
+                let plus_width = 24.0;
+                paint_clipped_text(
+                    ui.painter(),
+                    egui::Rect::from_min_max(
+                        egui::pos2(left, rect.top()),
+                        egui::pos2(rect.right() - plus_width, rect.bottom()),
+                    ),
+                    egui::pos2(left, rect.center().y),
+                    egui::Align2::LEFT_CENTER,
+                    &entry_text(entry),
+                    egui::FontId::proportional(text::CAPTION),
+                    theme.text_primary,
+                );
+                if response.hovered() {
+                    let plus_rect = egui::Rect::from_center_size(
+                        egui::pos2(rect.right() - plus_width / 2.0, rect.center().y),
+                        egui::vec2(20.0, 20.0),
+                    );
+                    let plus = ui.interact(
+                        plus_rect,
+                        ui.make_persistent_id(("want-entry", index)),
+                        egui::Sense::click(),
+                    );
+                    ui.painter().text(
+                        plus_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "+",
+                        egui::FontId::proportional(text::BODY),
+                        theme.accent,
+                    );
+                    if plus.clicked() {
                         actions.push(Action::WantSong {
-                            artist: (!entry.artist.trim().is_empty()).then(|| entry.artist.clone()),
+                            artist: (!entry.artist.trim().is_empty())
+                                .then(|| entry.artist.clone()),
                             title: entry.title.clone(),
                         });
                     }
-                });
-                ui.add_space(2.0);
+                }
             }
         });
 
@@ -163,13 +208,22 @@ pub fn render(
         .as_deref()
         .or(playlist.homepage.as_deref())
     {
-        ui.add_space(6.0);
+        ui.add_space(space::S);
         let label = match playlist.provider {
             Some(provider) => format!("{} ({provider})", t("panel.playlist_source")),
             None => t("panel.playlist_source").to_string(),
         };
         ui.hyperlink_to(label, url);
     }
+}
+
+fn empty_state(ui: &mut egui::Ui, theme: &Theme, title: &str) {
+    ui.label(
+        egui::RichText::new(title)
+            .size(text::HEADING)
+            .strong()
+            .color(theme.text_primary),
+    );
 }
 
 fn entry_text(entry: &crate::station_playlist::PlaylistEntry) -> String {

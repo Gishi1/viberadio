@@ -10,7 +10,10 @@ use crate::models::Station;
 use crate::i18n::{t, tf};
 
 use super::theme::Theme;
-use super::{paint_clipped_text, Action, SortKey, UiState, ROW_HEIGHT, TABLE_HEADER_HEIGHT};
+use super::{
+    ghost_button, paint_clipped_text, primary_button, row_fill, space, text, Action, SortKey,
+    UiState, ROW_HEIGHT, TABLE_HEADER_HEIGHT,
+};
 
 pub const SEARCH_ID: &str = "viberadio-station-search";
 
@@ -23,6 +26,7 @@ pub fn render(
     theme: &Theme,
     state: &mut UiState,
     stations: &[Station],
+    broken: usize,
     indices: &[usize],
     selected: Option<Uuid>,
     active_station: Option<Uuid>,
@@ -69,7 +73,7 @@ pub fn render(
             .id(search_id())
             .desired_width(field_width);
         edit = edit.text_color(theme.text_primary);
-        ui.add_sized([field_width, 28.0], edit);
+        ui.add_sized([field_width, 32.0], edit);
         if !state.search.is_empty() && ui.small_button("×").clicked() {
             state.search.clear();
             actions.push(Action::ClearSearch);
@@ -77,14 +81,13 @@ pub fn render(
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.label(
                 egui::RichText::new(count_text)
-                    .size(12.0)
+                    .size(text::CAPTION)
                     .color(theme.text_secondary),
             );
         });
     });
     ui.add_space(4.0);
 
-    let broken_count = stations.iter().filter(|station| station.broken).count();
     let missing = indices
         .iter()
         .filter(|index| stations[**index].bitrate.unwrap_or(0) == 0)
@@ -102,7 +105,7 @@ pub fn render(
             .count()
     };
     if !state.selected_stations.is_empty()
-        || broken_count > 0
+        || broken > 0
         || probe_targets > 0
         || state.probe_progress.is_some()
     {
@@ -141,9 +144,9 @@ pub fn render(
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.checkbox(&mut state.show_broken, t("table.show_broken"));
-                if broken_count > 0 {
+                if broken > 0 {
                     let label =
-                        tf("table.remove_broken", &[&broken_count.to_string()]);
+                        tf("table.remove_broken", &[&broken.to_string()]);
                     if ui.button(label).clicked() {
                         actions.push(Action::RemoveBroken);
                     }
@@ -181,7 +184,6 @@ pub fn render(
                     ui,
                     theme,
                     station,
-                    position,
                     playing,
                     focused,
                     active,
@@ -202,9 +204,12 @@ fn paint_header(ui: &mut egui::Ui, theme: &Theme, state: &mut UiState, rect: Rec
         [rect.left_bottom(), rect.right_bottom()],
         egui::Stroke::new(1.0, theme.border),
     );
-    let font = FontId::proportional(12.0);
+    let font = FontId::proportional(text::SECTION);
 
-    let star = Rect::from_center_size(columns.star.center(), egui::vec2(16.0, 16.0));
+    let star = Rect::from_center_size(
+        egui::pos2(rect.left() + 23.0, columns.star.center().y),
+        egui::vec2(16.0, 16.0),
+    );
     ui.painter().text(
         star.center(),
         Align2::CENTER_CENTER,
@@ -275,7 +280,7 @@ fn sort_header(
     } else {
         ""
     };
-    let text = format!("{label}{arrow}");
+    let heading = format!("{}{arrow}", label.to_uppercase());
     let pos = match anchor {
         Align2::RIGHT_CENTER => rect.right_center(),
         _ => rect.left_center(),
@@ -283,8 +288,8 @@ fn sort_header(
     ui.painter().text(
         pos,
         anchor,
-        text,
-        FontId::proportional(12.0),
+        heading,
+        FontId::proportional(text::SECTION),
         if active {
             theme.accent
         } else {
@@ -306,7 +311,6 @@ fn render_row(
     ui: &mut egui::Ui,
     theme: &Theme,
     station: &Station,
-    position: usize,
     playing: bool,
     focused: bool,
     active: bool,
@@ -318,28 +322,28 @@ fn render_row(
     let (rect, response) = ui.allocate_exact_size(egui::vec2(width, ROW_HEIGHT), Sense::click());
     let hovered = response.hovered();
     let selected = state.selected_stations.contains(&station.id) || focused;
-    let fill = if playing {
-        theme.bg_row_playing
-    } else if selected || hovered {
-        theme.bg_row_selected
-    } else if position % 2 == 1 {
-        theme.bg_row_alt
-    } else {
-        theme.bg_row
-    };
+    let fill = row_fill(theme, playing, selected, hovered);
     ui.painter().rect_filled(rect, 0.0, fill);
-    if active {
+    if selected || active {
         ui.painter().rect_filled(
             Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height())),
             0.0,
             theme.accent,
         );
     }
+    ui.painter().line_segment(
+        [rect.left_bottom(), rect.right_bottom()],
+        egui::Stroke::new(1.0, theme.border.gamma_multiply(0.5)),
+    );
+    if playing {
+        ui.painter()
+            .circle_filled(egui::pos2(rect.left() + 4.0, rect.center().y), 2.5, theme.accent);
+    }
 
     let columns = columns(rect);
 
     let star_rect = Rect::from_min_size(
-        egui::pos2(rect.left() + 6.0, rect.top()),
+        egui::pos2(rect.left() + 12.0, rect.top()),
         egui::vec2(22.0, ROW_HEIGHT),
     );
     let star = ui.interact(
@@ -356,7 +360,7 @@ fn render_row(
         star_rect.center(),
         Align2::CENTER_CENTER,
         if station.is_favorite { "★" } else { "☆" },
-        FontId::proportional(14.0),
+        FontId::proportional(text::BODY),
         star_color,
     );
 
@@ -371,51 +375,66 @@ fn render_row(
         egui::pos2(columns.name.left(), columns.name.center().y),
         Align2::LEFT_CENTER,
         &station.name,
-        FontId::proportional(14.0),
+        FontId::proportional(text::BODY),
         name_color,
     );
-    let genre = station
-        .genre
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
+    let genre = meaningful(station.genre.as_deref());
     let bitrate = station.bitrate.filter(|value| *value > 0);
-    let country = station
-        .country
-        .as_deref()
-        .filter(|value| !value.trim().is_empty());
+    let country = meaningful(station.country.as_deref());
     paint_clipped_text(
         ui.painter(),
         columns.genre,
         egui::pos2(columns.genre.left(), columns.genre.center().y),
         Align2::LEFT_CENTER,
         genre.unwrap_or("—"),
-        FontId::proportional(12.0),
+        FontId::proportional(text::CAPTION),
         if genre.is_some() {
             theme.text_secondary
         } else {
             theme.text_disabled
         },
     );
-    paint_clipped_text(
-        ui.painter(),
-        columns.bitrate,
-        egui::pos2(columns.bitrate.right(), columns.bitrate.center().y),
-        Align2::RIGHT_CENTER,
-        &bitrate_label(bitrate),
-        FontId::monospace(12.0),
-        if bitrate.is_some() {
-            theme.text_secondary
-        } else {
-            theme.text_disabled
-        },
-    );
+    let bitrate_right = columns.bitrate.right() - 8.0;
+    if let Some(value) = bitrate {
+        let suffix = ui.painter().layout_no_wrap(
+            "kbps".to_string(),
+            FontId::proportional(text::SECTION),
+            theme.text_disabled,
+        );
+        let suffix_pos = egui::pos2(bitrate_right - suffix.size().x, columns.bitrate.center().y);
+        ui.painter()
+            .galley(suffix_pos, suffix, theme.text_disabled);
+        let number_right = suffix_pos.x - 4.0;
+        paint_clipped_text(
+            ui.painter(),
+            Rect::from_min_max(
+                egui::pos2(columns.bitrate.left(), columns.bitrate.top()),
+                egui::pos2(number_right, columns.bitrate.bottom()),
+            ),
+            egui::pos2(number_right, columns.bitrate.center().y),
+            Align2::RIGHT_CENTER,
+            &value.to_string(),
+            FontId::monospace(text::CAPTION),
+            theme.text_secondary,
+        );
+    } else {
+        paint_clipped_text(
+            ui.painter(),
+            columns.bitrate,
+            egui::pos2(bitrate_right, columns.bitrate.center().y),
+            Align2::RIGHT_CENTER,
+            "—",
+            FontId::monospace(text::CAPTION),
+            theme.text_disabled,
+        );
+    }
     paint_clipped_text(
         ui.painter(),
         columns.country,
         egui::pos2(columns.country.left(), columns.country.center().y),
         Align2::LEFT_CENTER,
         country.unwrap_or("—"),
-        FontId::proportional(12.0),
+        FontId::proportional(text::CAPTION),
         if country.is_some() {
             theme.text_secondary
         } else {
@@ -463,6 +482,10 @@ fn render_row(
             actions.push(Action::Play(station.id));
             ui.close_menu();
         }
+        if ui.button(t("menu.station_info")).clicked() {
+            actions.push(Action::OpenStationInfo(station.id));
+            ui.close_menu();
+        }
         if ui.button(t("menu.schedule")).clicked() {
             actions.push(Action::ScheduleStation(station.id));
             ui.close_menu();
@@ -494,7 +517,6 @@ fn render_row(
             ui.close_menu();
         }
     });
-    response.on_hover_text(&station.url);
 }
 
 fn empty_library(ui: &mut egui::Ui, theme: &Theme, actions: &mut Vec<Action>) -> Vec<Action> {
@@ -502,26 +524,20 @@ fn empty_library(ui: &mut egui::Ui, theme: &Theme, actions: &mut Vec<Action>) ->
     ui.vertical_centered(|ui| {
         ui.label(
             egui::RichText::new(t("empty.title"))
-                .size(20.0)
+                .size(text::TITLE)
                 .strong()
                 .color(theme.text_primary),
         );
         ui.label(
             egui::RichText::new(t("empty.body"))
-                .size(14.0)
+                .size(text::CAPTION)
                 .color(theme.text_secondary),
         );
-        ui.add_space(12.0);
-        if ui
-            .add(
-                egui::Button::new(egui::RichText::new(t("empty.import")).color(theme.bg_app))
-                    .fill(theme.accent),
-            )
-            .clicked()
-        {
+        ui.add_space(space::M);
+        if ui.add(primary_button(t("empty.import"), theme)).clicked() {
             actions.push(Action::ImportRadioNet);
         }
-        if ui.button(t("empty.add")).clicked() {
+        if ui.add(ghost_button(t("empty.add"), theme)).clicked() {
             actions.push(Action::OpenAddStation);
         }
     });
@@ -538,7 +554,7 @@ fn empty_filter(
     ui.vertical_centered(|ui| {
         ui.label(
             egui::RichText::new(t("empty.no_match"))
-                .size(20.0)
+                .size(text::TITLE)
                 .strong()
                 .color(theme.text_primary),
         );
@@ -549,26 +565,30 @@ fn empty_filter(
         };
         ui.label(
             egui::RichText::new(hint)
-                .size(14.0)
+                .size(text::CAPTION)
                 .color(theme.text_secondary),
         );
-        ui.add_space(12.0);
-        if !state.search.is_empty() && ui.button(t("empty.clear_search")).clicked() {
+        ui.add_space(space::M);
+        if !state.search.is_empty() && ui.add(primary_button(t("empty.clear_search"), theme)).clicked()
+        {
             state.search.clear();
             actions.push(Action::ClearSearch);
         }
-        if state.filter != super::LibraryFilter::All && ui.button(t("empty.show_all")).clicked() {
+        if state.filter != super::LibraryFilter::All
+            && ui.add(ghost_button(t("empty.show_all"), theme)).clicked()
+        {
             state.filter = super::LibraryFilter::All;
         }
     });
     std::mem::take(actions)
 }
 
-fn bitrate_label(bitrate: Option<u32>) -> String {
-    match bitrate {
-        Some(value) => format!("{value} kbps"),
-        None => "—".to_string(),
-    }
+/// A value is shown only when it contains a real word; punctuation-only
+/// genres such as `#` are noise.
+fn meaningful(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.chars().any(char::is_alphanumeric))
 }
 
 struct Columns {
@@ -585,7 +605,7 @@ fn columns(rect: Rect) -> Columns {
     let genre_width = 150.0;
     let bitrate_width = 80.0;
     let country_width = 140.0;
-    let gap = 12.0;
+    let gap = 16.0;
     let name_left = rect.left() + star_width + pad;
     let country_left = rect.right() - country_width;
     let bitrate_right = country_left - gap;
@@ -634,8 +654,10 @@ mod tests {
     }
 
     #[test]
-    fn empty_bitrate_renders_a_dash() {
-        assert_eq!(bitrate_label(None), "—");
-        assert_eq!(bitrate_label(Some(128)), "128 kbps");
+    fn punctuation_only_values_are_hidden() {
+        assert_eq!(meaningful(Some("#")), None);
+        assert_eq!(meaningful(Some("  ")), None);
+        assert_eq!(meaningful(None), None);
+        assert_eq!(meaningful(Some("Dance")), Some("Dance"));
     }
 }

@@ -45,6 +45,9 @@ pub struct RecordingConfig {
     /// `min_fingerprint_seconds`. Set for explicit wish captures, where the
     /// user asked for the track and a partial recording is still wanted.
     pub keep_short: bool,
+    /// Stop after the first split track. Set for a one-off "Want this"
+    /// capture, so the recorder does not run through the rest of the station.
+    pub one_shot: bool,
 }
 
 impl RecordingConfig {
@@ -60,6 +63,7 @@ impl RecordingConfig {
             min_track_seconds: 0,
             min_fingerprint_seconds: 0,
             keep_short: false,
+            one_shot: false,
         }
     }
 }
@@ -69,6 +73,8 @@ pub struct RecordedSummary {
     pub files: usize,
     pub bytes: u64,
     pub dropped: bool,
+    /// Files kept despite an audio gap (a full queue dropped bytes).
+    pub incomplete: usize,
     pub error: Option<String>,
     /// Files that were kept (wishlist mode deletes the rest).
     pub paths: Vec<PathBuf>,
@@ -83,6 +89,8 @@ pub struct CompletedFile {
     pub path: PathBuf,
     /// The file has no track label yet and needs wishlist verification.
     pub unverified: bool,
+    /// Bytes were dropped while this file was open, so it may have a hole.
+    pub incomplete: bool,
 }
 
 /// One ordered writer event. Audio and titles share a queue so a title is
@@ -103,6 +111,14 @@ enum Event {
     /// event is dropped until the next title, so an ad break is not recorded.
     Boundary,
     Audio(Vec<u8>),
+    /// Replace the wishlist used to keep or discard split tracks. Sent when a
+    /// new wish arrives while a recording is already running.
+    Wishlist(Vec<WishEntry>),
+    /// Stop after the current track closes, for a one-off "Want this" capture.
+    OneShot,
+    /// The audio queue was full and dropped this many bytes. Coalesced with a
+    /// previous gap so a slow writer cannot grow the queue without bound.
+    Gap(u64),
 }
 
 /// The result of one queue wait. `Closed` means closed *and* drained, decided
@@ -164,6 +180,24 @@ impl SharedQueue {
         self.cond.notify_one();
     }
 
+    fn push_wishlist(&self, wishlist: Vec<WishEntry>) {
+        let mut queue = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.closed {
+            return;
+        }
+        queue.events.push_back(Event::Wishlist(wishlist));
+        self.cond.notify_one();
+    }
+
+    fn push_one_shot(&self) {
+        let mut queue = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if queue.closed {
+            return;
+        }
+        queue.events.push_back(Event::OneShot);
+        self.cond.notify_one();
+    }
+
     fn push_retitle(&self, from: &str, artist: &str, title: &str) {
         let mut queue = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if queue.closed {
@@ -184,6 +218,13 @@ impl SharedQueue {
         }
         if queue.audio_count >= AUDIO_QUEUE_CAPACITY {
             self.dropped.store(true, Ordering::Relaxed);
+            let dropped = audio.len() as u64;
+            if let Some(Event::Gap(bytes)) = queue.events.back_mut() {
+                *bytes += dropped;
+            } else {
+                queue.events.push_back(Event::Gap(dropped));
+            }
+            self.cond.notify_one();
             return;
         }
         queue.events.push_back(Event::Audio(audio));
@@ -284,8 +325,19 @@ impl Recording {
                                 writer.error = Some(e.to_string());
                             }
                         }
+                        Pop::Event(Event::Wishlist(wishlist)) => {
+                            writer.config.wishlist = wishlist;
+                        }
+                        Pop::Event(Event::OneShot) => {
+                            writer.config.one_shot = true;
+                            writer.config.keep_short = true;
+                        }
+                        Pop::Event(Event::Gap(bytes)) => writer.gap(bytes),
                         Pop::Timeout => {}
                         Pop::Closed => break,
+                    }
+                    if writer.stop_requested {
+                        break;
                     }
                 }
                 let result = writer.finish();
@@ -302,6 +354,15 @@ impl Recording {
             handle: Some(handle),
             detached: false,
         })
+    }
+
+    /// Whether the writer has stopped. A one-shot capture stops itself after
+    /// its only track, so the app uses this to finalize it.
+    pub fn is_finished(&self) -> bool {
+        self.handle
+            .as_ref()
+            .map(|handle| handle.is_finished())
+            .unwrap_or(true)
     }
 
     /// Drain the files that have closed since the last call.
@@ -328,6 +389,19 @@ impl Recording {
     /// Correct the open split file's name and label after a catalog lookup.
     pub fn retitle(&self, from: &str, artist: &str, title: &str) {
         self.queue.push_retitle(from, artist, title);
+    }
+
+    /// Replace the wishlist used to keep or discard split tracks. A wish added
+    /// while a recording is already running must reach its writer, otherwise
+    /// the current track is discarded at the boundary.
+    pub fn set_wishlist(&self, wishlist: Vec<WishEntry>) {
+        self.queue.push_wishlist(wishlist);
+    }
+
+    /// Stop after the current track closes. Used when a one-off wish arrives
+    /// while a recording is already running.
+    pub fn set_one_shot(&self) {
+        self.queue.push_one_shot();
     }
 
     /// Close the current split file at the expected end of the track. The next
@@ -386,6 +460,14 @@ impl Drop for Recording {
     }
 }
 
+/// Sidecar marker for a file whose audio has a gap. Directory scans skip it,
+/// so a damaged file is never fingerprinted or copied to `verified/`.
+pub(crate) fn incomplete_marker(path: &Path) -> PathBuf {
+    let mut marker = path.as_os_str().to_owned();
+    marker.push(".incomplete");
+    PathBuf::from(marker)
+}
+
 struct Writer {
     config: RecordingConfig,
     station: String,
@@ -406,6 +488,14 @@ struct Writer {
     /// After a scheduled boundary, audio is dropped until the next title so an
     /// ad or a talking segment is not written into the next song.
     discard_until_title: bool,
+    /// A one-shot capture has closed its only track; the worker should stop.
+    stop_requested: bool,
+    /// The file currently open lost audio to a full queue.
+    incomplete_current: bool,
+    /// Any file in this session lost audio.
+    any_gap: bool,
+    /// Files kept with a gap, for the summary.
+    incomplete_files: usize,
     /// Files closed so far, shared with the app.
     completed: Arc<Mutex<Vec<CompletedFile>>>,
     /// Path of the split file currently being written.
@@ -433,6 +523,10 @@ impl Writer {
             metadata_log_pending: Vec::new(),
             pending: Vec::new(),
             discard_until_title: false,
+            stop_requested: false,
+            incomplete_current: false,
+            any_gap: false,
+            incomplete_files: 0,
             completed,
             current_path,
             kept_paths: Vec::new(),
@@ -492,7 +586,15 @@ impl Writer {
             }
             // Audio after a title is written straight to the current file, so
             // there is no old-track tail left in the buffer here.
+            let had_file = self.current.is_some();
             self.close_current();
+            if self.config.one_shot && had_file {
+                // The one track the user asked for has closed; stop instead of
+                // opening a file for the next song.
+                self.stop_requested = true;
+                self.current_track.clear();
+                return Ok(());
+            }
             self.current_track = label;
             self.open_current()?;
             // The first title has no earlier file, so its buffered audio is the
@@ -651,7 +753,13 @@ impl Writer {
         .any(|entry| entry.action.eq_ignore_ascii_case("record"))
     }
 
+    fn gap(&mut self, _bytes: u64) {
+        self.incomplete_current = true;
+        self.any_gap = true;
+    }
+
     fn close_current(&mut self) {
+        let incomplete = std::mem::replace(&mut self.incomplete_current, false);
         let elapsed = self
             .current_started
             .map(|started| started.elapsed())
@@ -710,12 +818,27 @@ impl Writer {
                 let _ = std::fs::remove_file(&path);
                 self.files = self.files.saturating_sub(1);
             } else {
-                if unverified {
-                    self.unverified.push(path.clone());
+                if incomplete {
+                    let _ = fs::write(incomplete_marker(&path), b"");
+                    log::warn!(
+                        "{} lost audio while writing; keeping it but not verifying it",
+                        path.display()
+                    );
+                } else {
+                    if unverified {
+                        self.unverified.push(path.clone());
+                    }
+                    self.kept_paths.push(path.clone());
                 }
-                self.kept_paths.push(path.clone());
                 if let Ok(mut files) = self.completed.lock() {
-                    files.push(CompletedFile { path, unverified });
+                    files.push(CompletedFile {
+                        path,
+                        unverified,
+                        incomplete,
+                    });
+                }
+                if incomplete {
+                    self.incomplete_files += 1;
                 }
             }
         }
@@ -756,7 +879,8 @@ impl Writer {
         RecordedSummary {
             files: self.files,
             bytes: self.bytes,
-            dropped: false,
+            dropped: self.any_gap,
+            incomplete: self.incomplete_files,
             error: self.error,
             paths: self.kept_paths,
             unverified: self.unverified,
@@ -1198,6 +1322,56 @@ mod tests {
     }
 
     #[test]
+    fn a_running_recording_accepts_a_new_wish() {
+        let dir = temp_dir("wishlist-update");
+        let mut config = RecordingConfig::new(&dir);
+        config.template = "{artist} - {title}".to_string();
+        config.mode = RecordingMode::SplitPerTrack;
+        config.extension = "bin".to_string();
+        config.tag_format = Some("<Artist> - <Song>".into());
+        let recording = Recording::start(config, "Test FM".to_string(), Local::now()).unwrap();
+        recording.write(b"one");
+        recording.set_track(Some("Artist One"), Some("Song One"));
+        // "Want this" arrives mid-song, after the recording already started.
+        recording.set_wishlist(vec![WishEntry {
+            id: 0,
+            artist: Some("Artist One".into()),
+            song_title: Some("Song One".into()),
+            action: "record".into(),
+            compare: crate::metadata::CompareMode::Contains,
+        }]);
+        recording.write(b"two");
+        recording.set_track(Some("Artist Two"), Some("Song Two"));
+        recording.write(b"three");
+        let summary = recording.finish();
+        assert!(dir.join("Artist One - Song One.bin").exists());
+        assert!(!dir.join("Artist Two - Song Two.bin").exists());
+        assert_eq!(summary.files, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_shot_stops_after_the_first_track() {
+        let dir = temp_dir("one-shot");
+        let mut config = RecordingConfig::new(&dir);
+        config.template = "{artist} - {title}".to_string();
+        config.mode = RecordingMode::SplitPerTrack;
+        config.extension = "bin".to_string();
+        config.one_shot = true;
+        let recording = Recording::start(config, "Test FM".to_string(), Local::now()).unwrap();
+        recording.write(b"one");
+        recording.set_track(Some("Artist One"), Some("Song One"));
+        recording.write(b"two");
+        recording.set_track(Some("Artist Two"), Some("Song Two"));
+        recording.write(b"three");
+        let summary = recording.finish();
+        assert!(dir.join("Artist One - Song One.bin").exists());
+        assert!(!dir.join("Artist Two - Song Two.bin").exists());
+        assert_eq!(summary.files, 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn short_split_fragments_are_discarded() {
         let dir = temp_dir("short-split");
         let mut config = RecordingConfig::new(&dir);
@@ -1345,6 +1519,7 @@ mod tests {
         recording.set_track(Some("Queue Artist"), Some("Queue Song"));
         let summary = recording.finish();
         assert!(summary.dropped, "the audio queue must overflow");
+        assert_eq!(summary.incomplete, 1, "the kept file must be flagged");
         let log = fs::read_to_string(dir.join("tracks.jsonl")).unwrap();
         let line: serde_json::Value = serde_json::from_str(log.lines().next().unwrap()).unwrap();
         assert_eq!(line["artist"], "Queue Artist");
@@ -1363,6 +1538,44 @@ mod tests {
             summary.bytes, offset,
             "the title is the last event, so the file ends at its offset"
         );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_gap_flags_only_the_file_that_was_open() {
+        let dir = temp_dir("gap-per-file");
+        fs::create_dir_all(&dir).unwrap();
+        let mut config = RecordingConfig::new(&dir);
+        config.mode = RecordingMode::SplitPerTrack;
+        config.template = "gap".to_string();
+        config.extension = "bin".to_string();
+        let completed = Arc::new(Mutex::new(Vec::new()));
+        let current_path = Arc::new(Mutex::new(None));
+        let mut writer = Writer::new(
+            config,
+            "Gap FM".to_string(),
+            Local::now(),
+            Arc::clone(&completed),
+            current_path,
+        );
+        writer.track(Some("A"), Some("One")).unwrap();
+        writer.write(&[1u8; 1024]).unwrap();
+        writer.gap(512);
+        writer.track(Some("B"), Some("Two")).unwrap();
+        writer.write(&[2u8; 1024]).unwrap();
+        writer.track(Some("C"), Some("Three")).unwrap();
+        let files = completed.lock().unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files[0].incomplete, "the gap belongs to the first file");
+        assert!(
+            incomplete_marker(&files[0].path).exists(),
+            "the gap must leave a scan marker"
+        );
+        assert!(
+            !files[1].incomplete,
+            "the second file was written after the gap"
+        );
+        drop(files);
         let _ = fs::remove_dir_all(&dir);
     }
 

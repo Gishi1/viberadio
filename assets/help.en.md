@@ -12,12 +12,16 @@ the application and works offline.
   station, status, bitrate, transport and volume.
 - Space starts or stops playback. The left and right arrows change the volume.
   "/" focuses the search field.
+- F11 opens the fullscreen display view for a media centre or TV. Esc leaves it.
+- "Station info" (right panel, station context menu, or the display view) shows
+  genre, country, codec, bitrate, website and stream URL, with an Open website
+  button.
 
 ## Library
 
 - Filters: All, Favourites, Recently played and each genre with a count.
 - Search matches name, URL, genre, country, state, city and tags as you type.
-- Right-click a station for Play, Schedule and favourite.
+- Right-click a station for Play, Station info, Schedule and favourite.
 - "Export M3U" writes the library as a playlist; "Import M3U" adds one back.
 - "Export history" writes a self-contained HTML table.
 
@@ -29,8 +33,8 @@ the application and works offline.
 - Status is one of connecting, buffering, live or error. Stop cancels a blocked
   connect immediately.
 - MP3, OGG Vorbis, FLAC and WAV use rodio. AAC-LC uses a symphonia fallback.
-  HE-AAC is expected to fail or play degraded. Opus needs libopus. HLS is not
-  supported yet.
+  HE-AAC is expected to fail or play degraded. Opus needs libopus. HLS is
+  followed from master and media playlists.
 
 ## Metadata and history
 
@@ -87,7 +91,8 @@ the application and works offline.
 | Left / Right    | Volume down / up               |
 | Ctrl+Left/Right | Previous / next stream         |
 | /               | Focus search                   |
-| Esc             | Close the Add station dialog   |
+| Esc             | Exit display or close dialogs  |
+| F11             | Fullscreen display view        |
 | Ctrl+D          | Metadata debug view            |
 | Ctrl+H          | History                        |
 | Ctrl+R          | Toggle recording               |

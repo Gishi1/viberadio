@@ -53,6 +53,14 @@ pub struct DbManager {
 impl DbManager {
     pub fn new(path: &str) -> Result<Self> {
         let conn = Connection::open(path)?;
+        // WAL keeps a UI read from blocking on a history write, and NORMAL is
+        // durable enough for this data without an fsync per row.
+        conn.execute_batch(
+            "PRAGMA busy_timeout=5000;
+             PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+            ",
+        )?;
         Ok(Self { conn })
     }
 
@@ -1284,6 +1292,17 @@ impl DbManager {
     /// still uses the unlimited query.
     pub fn load_recent_history(&self, limit: usize) -> Result<Vec<StationHistory>> {
         self.load_history_limit(Some(limit))
+    }
+
+    /// Delete history rows older than `days`. Zero keeps everything.
+    pub fn prune_history(&self, days: u32) -> Result<usize> {
+        if days == 0 {
+            return Ok(0);
+        }
+        let cutoff = (chrono::Utc::now() - chrono::Duration::days(i64::from(days))).to_rfc3339();
+        Ok(self
+            .conn
+            .execute("DELETE FROM history WHERE played_at < ?1", [cutoff])?)
     }
 
     fn load_history_limit(&self, limit: Option<usize>) -> Result<Vec<StationHistory>> {
@@ -3574,6 +3593,28 @@ mod tests {
         db.set_custom_tag_format(station, Some("  ")).unwrap();
         assert_eq!(db.custom_tag_format(station).unwrap(), None);
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn history_older_than_the_retention_window_is_pruned() {
+        let path = temp_path("prune-history");
+        let db = DbManager::new(path.to_str().unwrap()).unwrap();
+        db.init_schema().unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO history (id, station_id, station_name, played_at, status)
+                 VALUES (?1, ?2, ?3, ?4, 'ended')",
+                rusqlite::params![
+                    Uuid::new_v4().to_string(),
+                    Uuid::new_v4().to_string(),
+                    "Old FM",
+                    "2000-01-01T00:00:00+00:00",
+                ],
+            )
+            .unwrap();
+        assert_eq!(db.prune_history(365).unwrap(), 1);
+        assert!(db.load_recent_history(10).unwrap().is_empty());
         let _ = std::fs::remove_file(&path);
     }
 }

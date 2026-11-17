@@ -102,6 +102,9 @@ pub enum PlaybackStatus {
     Connecting,
     Buffering,
     Live,
+    /// The output device stopped consuming samples; playback bytes are being
+    /// dropped so the network reader and the recorder keep moving.
+    Stalled,
     Error,
     Stopped,
 }
@@ -111,7 +114,10 @@ impl PlaybackStatus {
     pub fn is_active(self) -> bool {
         matches!(
             self,
-            PlaybackStatus::Connecting | PlaybackStatus::Buffering | PlaybackStatus::Live
+            PlaybackStatus::Connecting
+                | PlaybackStatus::Buffering
+                | PlaybackStatus::Live
+                | PlaybackStatus::Stalled
         )
     }
 }
@@ -288,13 +294,22 @@ fn open_output(name: Option<&str>) -> Result<(OutputStream, OutputStreamHandle),
     })
 }
 
+/// One ICY title seen by a stream worker. The coordinator drains these so
+/// wishes and schedule handling do not depend on the UI repainting.
+#[derive(Debug, Clone)]
+pub struct TitleEvent {
+    pub playback_id: PlaybackId,
+    pub station_id: Option<Uuid>,
+    pub title: String,
+}
+
 /// Handle to the playback engine. Cheap to clone? No: one handle owns the
 /// controller thread; the app keeps it in a single field.
 pub struct RadioPlayer {
     tx: Arc<Mutex<Sender<AudioCommand>>>,
     streams: Arc<Mutex<BTreeMap<PlaybackId, Arc<StreamShared>>>>,
-    next_id: AtomicU64,
-    active: AtomicU64,
+    next_id: Arc<AtomicU64>,
+    active: Arc<AtomicU64>,
     revision: Arc<AtomicU64>,
     device_error: Arc<Mutex<Option<String>>>,
     /// Non-fatal startup message, e.g. a remembered device that disappeared.
@@ -304,6 +319,8 @@ pub struct RadioPlayer {
     controller: Mutex<Option<JoinHandle<()>>>,
     /// Global Dynamic Boost preset, shared by every stream worker.
     dsp_preset: Arc<AtomicU32>,
+    /// Title events for the background coordinator.
+    titles: Arc<Mutex<VecDeque<TitleEvent>>>,
 }
 
 impl RadioPlayer {
@@ -346,14 +363,15 @@ impl RadioPlayer {
         Self {
             tx: Arc::new(Mutex::new(tx)),
             streams,
-            next_id: AtomicU64::new(1),
-            active: AtomicU64::new(0),
+            next_id: Arc::new(AtomicU64::new(1)),
+            active: Arc::new(AtomicU64::new(0)),
             revision,
             device_error,
             device_notice,
             stream_seconds: Arc::new(AtomicU32::new(DEFAULT_STREAM_BUFFER_SECS)),
             controller: Mutex::new(Some(controller)),
             dsp_preset: Arc::new(AtomicU32::new(DspPreset::Off as u32)),
+            titles: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -366,12 +384,13 @@ impl RadioPlayer {
         let shared = Arc::new(StreamShared::new_with_buffer(
             id,
             &request,
-            self.device_error.lock().unwrap().clone(),
+            self.device_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
             Arc::clone(&self.revision),
             Arc::clone(&self.dsp_preset),
             Arc::clone(&self.stream_seconds),
+            Arc::clone(&self.titles),
         ));
-        self.streams.lock().unwrap().insert(id, Arc::clone(&shared));
+        self.streams.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::clone(&shared));
         if !request.record_only {
             self.active.store(id, Ordering::SeqCst);
         }
@@ -395,7 +414,7 @@ impl RadioPlayer {
     /// Stop one stream instance. The entry disappears from [`Self::streams`]
     /// immediately; the worker drops its sink and cancels the download.
     pub fn stop_stream(&self, id: PlaybackId) {
-        if let Some(shared) = self.streams.lock().unwrap().remove(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
             shared.cancel();
         }
         self.repick_active();
@@ -403,7 +422,7 @@ impl RadioPlayer {
     }
 
     pub fn stop_all(&self) {
-        let ids: Vec<PlaybackId> = self.streams.lock().unwrap().keys().copied().collect();
+        let ids: Vec<PlaybackId> = self.streams.lock().unwrap_or_else(|e| e.into_inner()).keys().copied().collect();
         for id in &ids {
             self.stop_stream(*id);
         }
@@ -466,7 +485,7 @@ impl RadioPlayer {
 
     fn repick_active(&self) {
         let current = self.active.load(Ordering::SeqCst);
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         if streams.contains_key(&current) {
             return;
         }
@@ -481,13 +500,13 @@ impl RadioPlayer {
 
     pub fn set_stream_volume(&self, id: PlaybackId, volume: f32) {
         let volume = volume.clamp(0.0, 1.0);
-        if let Some(shared) = self.streams.lock().unwrap().get(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             shared.set_volume(volume);
         }
     }
 
     pub fn set_stream_gain(&self, id: PlaybackId, gain_db: f32) {
-        if let Some(shared) = self.streams.lock().unwrap().get(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             shared.set_gain_db(gain_db);
         }
     }
@@ -539,20 +558,51 @@ impl RadioPlayer {
 
     /// Resize the watch buffer of a running watched stream.
     pub fn set_watch_capacity(&self, id: PlaybackId, bytes: usize) {
-        if let Some(shared) = self.streams.lock().unwrap().get(&id).cloned() {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned() {
             shared.set_watch_capacity(bytes);
         }
     }
 
+    /// Hand a new wishlist to a recording that is already running, so a wish
+    /// added mid-song is honored at the next track boundary.
+    pub fn set_recording_wishlist(
+        &self,
+        id: PlaybackId,
+        wishlist: Vec<crate::metadata::WishEntry>,
+    ) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned() {
+            shared.set_recording_wishlist(wishlist);
+        }
+    }
+
+    /// Mark a running recording as one-shot, so it stops after this track.
+    pub fn set_recording_one_shot(&self, id: PlaybackId) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned() {
+            shared.set_recording_one_shot();
+        }
+    }
+
+    /// Finalize a recording whose writer stopped itself (a one-shot capture).
+    /// Returns true when a recording was taken.
+    pub fn take_self_finished_recording(&self, id: PlaybackId) -> bool {
+        self.streams
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .map(|shared| shared.take_self_finished_recording())
+            .unwrap_or(false)
+    }
+
     /// Close the recording and return a join handle, so the UI can poll instead
     /// of waiting for a slow disk.
-    pub fn stop_recording_async(&self, id: PlaybackId) -> Option<JoinHandle<RecordedSummary>> {        let shared = self.streams.lock().unwrap().get(&id).cloned()?;
+    pub fn stop_recording_async(&self, id: PlaybackId) -> Option<JoinHandle<RecordedSummary>> {        let shared = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
         shared.stop_recording_async()
     }
 
     /// Summary of a recording closed by the stream's terminal path.
     pub fn take_finished_recording(&self, id: PlaybackId) -> Option<RecordedSummary> {
-        let shared = self.streams.lock().unwrap().get(&id).cloned()?;
+        let shared = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
         shared.take_finished_recording()
     }
 
@@ -562,28 +612,28 @@ impl RadioPlayer {
         artist: Option<&str>,
         title: Option<&str>,
     ) {
-        if let Some(shared) = self.streams.lock().unwrap().get(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             shared.set_recording_track(artist, title);
         }
     }
 
     /// Correct the open split file after a catalog lookup recovered the artist.
     pub fn retitle_recording(&self, id: PlaybackId, from: &str, artist: &str, title: &str) {
-        if let Some(shared) = self.streams.lock().unwrap().get(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             shared.retitle_recording(from, artist, title);
         }
     }
 
     /// Close the current split file at the expected end of its track.
     pub fn set_recording_boundary(&self, id: PlaybackId) {
-        if let Some(shared) = self.streams.lock().unwrap().get(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             shared.recording_boundary();
         }
     }
 
     /// Files that closed while the recording kept running.
     pub fn take_completed_recordings(&self, id: PlaybackId) -> Vec<CompletedFile> {
-        if let Some(shared) = self.streams.lock().unwrap().get(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             shared.take_completed_recordings()
         } else {
             Vec::new()
@@ -592,7 +642,7 @@ impl RadioPlayer {
 
     /// Path of the split file being written, if the stream is recording.
     pub fn current_recording_path(&self, id: PlaybackId) -> Option<std::path::PathBuf> {
-        if let Some(shared) = self.streams.lock().unwrap().get(&id) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
             shared.current_recording_path()
         } else {
             None
@@ -608,7 +658,7 @@ impl RadioPlayer {
         // Read membership and the active pointer under one registry lock, so a
         // frame cannot show "Idle" next to a non-empty stream list.
         let (streams, active_id) = {
-            let registry = self.streams.lock().unwrap();
+            let registry = self.streams.lock().unwrap_or_else(|e| e.into_inner());
             let active_id = self.active.load(Ordering::SeqCst);
             let streams: Vec<StreamSnapshot> =
                 registry.values().map(|stream| stream.snapshot()).collect();
@@ -625,7 +675,7 @@ impl RadioPlayer {
 
     /// Make `id` the active stream. Returns false when the stream is gone.
     pub fn set_active(&self, id: PlaybackId) -> bool {
-        let streams = self.streams.lock().unwrap();
+        let streams = self.streams.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(shared) = streams.get(&id) {
             if shared.record_only() {
                 return false;
@@ -639,6 +689,172 @@ impl RadioPlayer {
         }
     }
 
+}
+
+/// A cloneable engine handle for the background coordinator. It shares the
+/// same streams, command channel and title queue as [`RadioPlayer`], but does
+/// not own the audio controller thread.
+#[derive(Clone)]
+pub struct PlayerControl {
+    tx: Arc<Mutex<Sender<AudioCommand>>>,
+    streams: Arc<Mutex<BTreeMap<PlaybackId, Arc<StreamShared>>>>,
+    next_id: Arc<AtomicU64>,
+    active: Arc<AtomicU64>,
+    revision: Arc<AtomicU64>,
+    device_error: Arc<Mutex<Option<String>>>,
+    stream_seconds: Arc<AtomicU32>,
+    dsp_preset: Arc<AtomicU32>,
+    titles: Arc<Mutex<VecDeque<TitleEvent>>>,
+}
+
+impl PlayerControl {
+    pub fn snapshot(&self) -> EngineSnapshot {
+        let (streams, active_id) = {
+            let registry = self.streams.lock().unwrap_or_else(|e| e.into_inner());
+            let active_id = self.active.load(Ordering::SeqCst);
+            let streams: Vec<StreamSnapshot> =
+                registry.values().map(|stream| stream.snapshot()).collect();
+            (streams, active_id)
+        };
+        let active = streams.iter().find(|stream| stream.id == active_id).cloned();
+        EngineSnapshot {
+            revision: self.revision.load(Ordering::SeqCst),
+            active,
+            streams,
+        }
+    }
+
+    pub fn play_stream(&self, request: PlayRequest) -> PlaybackId {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let shared = Arc::new(StreamShared::new_with_buffer(
+            id,
+            &request,
+            self.device_error.lock().unwrap_or_else(|e| e.into_inner()).clone(),
+            Arc::clone(&self.revision),
+            Arc::clone(&self.dsp_preset),
+            Arc::clone(&self.stream_seconds),
+            Arc::clone(&self.titles),
+        ));
+        self.streams.lock().unwrap_or_else(|e| e.into_inner()).insert(id, Arc::clone(&shared));
+        if !request.record_only {
+            self.active.store(id, Ordering::SeqCst);
+        }
+        self.revision.fetch_add(1, Ordering::SeqCst);
+        let sent = self.tx.lock().map(|tx| {
+            tx.send(AudioCommand::Start {
+                id,
+                request,
+                shared: Arc::clone(&shared),
+            })
+        });
+        match sent {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => shared.finish_error(format!("audio controller is not running: {e}")),
+            Err(_) => shared.finish_error("audio controller lock is poisoned".to_string()),
+        }
+        id
+    }
+
+    pub fn stop_stream(&self, id: PlaybackId) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).remove(&id) {
+            shared.cancel();
+        }
+        self.repick_active();
+        self.revision.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn repick_active(&self) {
+        let current = self.active.load(Ordering::SeqCst);
+        let streams = self.streams.lock().unwrap_or_else(|e| e.into_inner());
+        if streams.contains_key(&current) {
+            return;
+        }
+        let next = streams
+            .iter()
+            .rev()
+            .find(|(_, shared)| !shared.record_only())
+            .map(|(id, _)| *id)
+            .unwrap_or(0);
+        self.active.store(next, Ordering::SeqCst);
+    }
+
+    pub fn start_recording(
+        &self,
+        id: PlaybackId,
+        config: RecordingConfig,
+        station: String,
+    ) -> std::io::Result<()> {
+        let shared = self
+            .streams
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "stream is not open")
+            })?;
+        shared.start_recording(config, station)
+    }
+
+    pub fn promote_watch(
+        &self,
+        id: PlaybackId,
+        config: RecordingConfig,
+        station: String,
+        artist: Option<&str>,
+        title: Option<&str>,
+    ) -> std::io::Result<bool> {
+        let shared = self
+            .streams
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::NotFound, "stream is not open")
+            })?;
+        shared.promote_watch(config, station, artist, title)
+    }
+
+    pub fn stop_recording_async(&self, id: PlaybackId) -> Option<JoinHandle<RecordedSummary>> {
+        let shared = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
+        shared.stop_recording_async()
+    }
+
+    pub fn set_recording_track(&self, id: PlaybackId, artist: Option<&str>, title: Option<&str>) {
+        if let Some(shared) = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+            shared.set_recording_track(artist, title);
+        }
+    }
+
+    pub fn take_finished_recording(&self, id: PlaybackId) -> Option<RecordedSummary> {
+        let shared = self.streams.lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()?;
+        shared.take_finished_recording()
+    }
+
+    /// Drain title events for the coordinator.
+    pub fn take_titles(&self) -> Vec<TitleEvent> {
+        let mut queue = self.titles.lock().unwrap_or_else(|e| e.into_inner());
+        queue.drain(..).collect()
+    }
+}
+
+impl RadioPlayer {
+    /// A cloneable handle for a background worker that must start and stop
+    /// streams without touching the UI.
+    pub fn control(&self) -> PlayerControl {
+        PlayerControl {
+            tx: Arc::clone(&self.tx),
+            streams: Arc::clone(&self.streams),
+            next_id: Arc::clone(&self.next_id),
+            active: Arc::clone(&self.active),
+            revision: Arc::clone(&self.revision),
+            device_error: Arc::clone(&self.device_error),
+            stream_seconds: Arc::clone(&self.stream_seconds),
+            dsp_preset: Arc::clone(&self.dsp_preset),
+            titles: Arc::clone(&self.titles),
+        }
+    }
 }
 
 impl Default for RadioPlayer {
@@ -730,6 +946,8 @@ struct StreamShared {
     watch: Mutex<Option<WatchBuffer>>,
     /// Whether this stream is a watch stream.
     watching: bool,
+    /// Title events for the background coordinator.
+    titles: Arc<Mutex<VecDeque<TitleEvent>>>,
 }
 
 /// Rolling compressed-audio buffer for a watched station. A mark records where
@@ -838,6 +1056,7 @@ impl StreamShared {
             revision,
             dsp_preset,
             Arc::new(AtomicU32::new(DEFAULT_STREAM_BUFFER_SECS)),
+            Arc::new(Mutex::new(VecDeque::new())),
         )
     }
 
@@ -848,6 +1067,7 @@ impl StreamShared {
         revision: Arc<AtomicU64>,
         dsp_preset: Arc<AtomicU32>,
         stream_seconds: Arc<AtomicU32>,
+        titles: Arc<Mutex<VecDeque<TitleEvent>>>,
     ) -> Self {
         let initial_status = if device_error.is_some() {
             PlaybackStatus::Error
@@ -887,6 +1107,7 @@ impl StreamShared {
             gain_db: AtomicU32::new(request.gain_db.clamp(-12.0, 12.0).to_bits()),
             dsp_preset,
             stream_seconds,
+            titles,
             ring_limit: AtomicUsize::new(RING_SAMPLES),
             watch: Mutex::new(
                 request
@@ -1201,6 +1422,49 @@ impl StreamShared {
         }
     }
 
+    fn set_recording_wishlist(&self, wishlist: Vec<crate::metadata::WishEntry>) {
+        if let Some(recording) = self
+            .recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            recording.set_wishlist(wishlist);
+        }
+    }
+
+    fn set_recording_one_shot(&self) {
+        if let Some(recording) = self
+            .recording
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            recording.set_one_shot();
+        }
+    }
+
+    fn take_self_finished_recording(&self) -> bool {
+        let recording = {
+            let mut slot = self.recording.lock().unwrap_or_else(|e| e.into_inner());
+            match slot.as_ref() {
+                Some(recording) if recording.is_finished() => slot.take(),
+                _ => None,
+            }
+        };
+        if let Some(recording) = recording {
+            let summary = recording.finish();
+            *self
+                .finished_recording
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(summary);
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
     fn retitle_recording(&self, from: &str, artist: &str, title: &str) {
         if let Some(recording) = self
             .recording
@@ -1269,6 +1533,18 @@ impl StreamShared {
         }
     }
 
+    fn push_title(&self, title: &str) {
+        let mut queue = self.titles.lock().unwrap_or_else(|e| e.into_inner());
+        queue.push_back(TitleEvent {
+            playback_id: self.id,
+            station_id: self.station_id,
+            title: title.to_string(),
+        });
+        if queue.len() > 4096 {
+            queue.pop_front();
+        }
+    }
+
     /// Start a recording from the buffered audio of the current song. The
     /// pre-roll is written before any live audio, so the file starts at the
     /// title mark rather than at the trigger.
@@ -1283,7 +1559,13 @@ impl StreamShared {
             .recording
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if recording.is_some() {
+        if let Some(existing) = recording.as_ref() {
+            // The recording is already running; hand it the new wishlist so
+            // the current track is kept instead of discarded at the boundary.
+            existing.set_wishlist(config.wishlist.clone());
+            if config.one_shot {
+                existing.set_one_shot();
+            }
             return Ok(false);
         }
         let handle =
@@ -1394,6 +1676,7 @@ fn status_text(url: &str, status: PlaybackStatus, error: Option<&str>) -> String
         },
         PlaybackStatus::Buffering => format!("Buffering {url}"),
         PlaybackStatus::Live => format!("Playing {url}"),
+        PlaybackStatus::Stalled => format!("Audio output stalled; recording continues ({url})"),
         PlaybackStatus::Error => format!(
             "Stopped: {}",
             error.unwrap_or("unknown error")
@@ -2048,6 +2331,9 @@ struct BufferState {
     eof: bool,
     error: Option<String>,
     sliding: bool,
+    /// Set when a full buffer forced a playback drop; cleared as soon as there
+    /// is room again, so a stalled sink drops chunks without a 5 s wait each.
+    stalled: bool,
 }
 
 type Shared = Arc<(Mutex<BufferState>, Condvar)>;
@@ -2062,6 +2348,7 @@ fn new_shared() -> Shared {
             eof: false,
             error: None,
             sliding: false,
+            stalled: false,
         }),
         Condvar::new(),
     ))
@@ -2251,18 +2538,44 @@ fn slide_consumed(state: &mut BufferState, pos: u64) {
     state.base += drop_n as u64;
 }
 
+/// Why an append stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Append {
+    Ok,
+    Cancelled,
+    /// The playback buffer stayed full for [`PLAYBACK_STALL_TIMEOUT`]; the
+    /// caller should drop this chunk and keep reading.
+    Stalled,
+}
+
+/// How long a full playback buffer may stay full before playback bytes are
+/// dropped. Recording has already received the audio by then, so a stalled
+/// sink cannot starve the recorder or the socket.
+const PLAYBACK_STALL_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Append a chunk, blocking while the window is full so the network is
-/// back-pressured instead of buffered without bound. Returns `false` on cancel.
-fn append_chunk(shared: &Shared, chunk: &[u8], cancel: &AtomicBool) -> bool {
+/// back-pressured instead of buffered without bound. A sink that stays full
+/// past [`PLAYBACK_STALL_TIMEOUT`] reports [`Append::Stalled`] instead of
+/// blocking the reader forever.
+fn append_chunk(shared: &Shared, chunk: &[u8], cancel: &AtomicBool) -> Append {
     let (lock, cvar) = &**shared;
     let mut state = lock.lock().unwrap_or_else(|e| e.into_inner());
     let mut written = 0usize;
+    let mut full_since: Option<Instant> = None;
     while written < chunk.len() {
         if cancel.load(Ordering::SeqCst) {
-            return false;
+            return Append::Cancelled;
         }
         let room = MAX_BUFFER_BYTES.saturating_sub(state.data.len());
         if room == 0 {
+            if state.stalled {
+                return Append::Stalled;
+            }
+            let since = *full_since.get_or_insert_with(Instant::now);
+            if since.elapsed() >= PLAYBACK_STALL_TIMEOUT {
+                state.stalled = true;
+                return Append::Stalled;
+            }
             let (next, _) = match cvar.wait_timeout(state, Duration::from_millis(50)) {
                 Ok(pair) => pair,
                 Err(e) => e.into_inner(),
@@ -2270,6 +2583,8 @@ fn append_chunk(shared: &Shared, chunk: &[u8], cancel: &AtomicBool) -> bool {
             state = next;
             continue;
         }
+        state.stalled = false;
+        full_since = None;
         let take = room.min(chunk.len() - written);
         state
             .data
@@ -2282,7 +2597,7 @@ fn append_chunk(shared: &Shared, chunk: &[u8], cancel: &AtomicBool) -> bool {
         written += take;
         cvar.notify_all();
     }
-    true
+    Append::Ok
 }
 
 fn buffer_error(shared: &Shared, msg: String) {
@@ -2520,14 +2835,21 @@ fn push_demuxed(
             owner.record_audio(audio);
             if owner.record_only() {
                 owner.set_status(PlaybackStatus::Live);
-            } else if !append_chunk(shared, audio, cancel) {
-                ok = false;
-                return;
+            } else {
+                match append_chunk(shared, audio, cancel) {
+                    Append::Ok => {}
+                    Append::Cancelled => {
+                        ok = false;
+                        return;
+                    }
+                    Append::Stalled => owner.set_status(PlaybackStatus::Stalled),
+                }
             }
         }
         if let Some(title) = title {
             owner.watch_title(title);
             owner.set_now_playing(attempt, title.to_string());
+            owner.push_title(title);
         }
     });
     ok
@@ -3201,6 +3523,24 @@ mod tests {
         assert!(err.to_string().contains("boom"));
     }
 
+    #[test]
+    fn a_stalled_sink_reports_stall_without_waiting() {
+        let shared = new_shared();
+        {
+            let (lock, _) = &*shared;
+            let mut state = lock.lock().unwrap();
+            state.data.resize(MAX_BUFFER_BYTES, 0);
+            state.stalled = true;
+        }
+        let started = Instant::now();
+        let outcome = append_chunk(&shared, b"x", &AtomicBool::new(false));
+        assert_eq!(outcome, Append::Stalled);
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "a known stall must drop immediately, not wait for the timeout"
+        );
+    }
+
     fn probe_deadline(shared: &Shared) -> Option<Instant> {
         let (lock, _) = &**shared;
         lock.lock().unwrap().probe_deadline
@@ -3462,7 +3802,7 @@ mod tests {
                 let mut sent = 0usize;
                 while sent < total {
                     let take = (total - sent).min(chunk.len());
-                    if !append_chunk(&shared, &chunk[..take], &cancel) {
+                    if append_chunk(&shared, &chunk[..take], &cancel) == Append::Cancelled {
                         return false;
                     }
                     sent += take;
@@ -4695,6 +5035,7 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU32::new(DspPreset::Off as u32)),
             Arc::clone(&setting),
+            Arc::new(Mutex::new(VecDeque::new())),
         ));
         (owner, setting)
     }

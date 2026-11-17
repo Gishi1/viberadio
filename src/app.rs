@@ -6,6 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ use eframe::egui;
 use uuid::Uuid;
 
 use crate::database::DbManager;
+use crate::coordinator::{CoordStation, Coordinator, CoordinatorEvent, CoordinatorState};
 use crate::dsp::DspPreset;
 use crate::duration::TrackInfo;
 use crate::i18n::{self, t, tf};
@@ -23,7 +25,7 @@ use crate::player::{
     EngineSnapshot, PlayRequest, PlaybackId, PlaybackStatus, RadioPlayer, ReconnectPolicy,
 };
 use crate::radionet;
-use crate::recording::RecordedSummary;
+use crate::recording::{RecordedSummary, RecordingConfig};
 use crate::scheduler::{
     self, FinishAction, Recurrence, Schedule, ScheduleAction, ScheduleDraft, SchedulerEffect,
     SchedulerRuntime, WEEKDAYS,
@@ -46,6 +48,13 @@ enum HelpBlock {
 /// Join the hard-wrapped lines in the bundled markdown into paragraphs and
 /// bullets, so egui re-wraps to the window instead of reproducing ragged source
 /// line breaks.
+/// A station field is shown only when it has a real value.
+fn info_value(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn parse_help(text: &str) -> Vec<HelpBlock> {
     fn flush_paragraph(blocks: &mut Vec<HelpBlock>, paragraph: &mut String) {
         if !paragraph.is_empty() {
@@ -158,9 +167,15 @@ pub struct VibeRadioApp {
     /// Library counts are derived from the station list and history; cache them
     /// so a large imported library is not rescanned on every frame.
     stats: LibraryStats,
-    stats_key: Option<(u64, u64)>,
+    stats_key: Option<(u64, u64, bool)>,
     view_key: Option<ViewKey>,
     view_indices: Vec<usize>,
+    /// Cached lowercase keys for the current station list.
+    station_keys: Vec<StationKeys>,
+    station_keys_revision: u64,
+    /// Cached station ids for the scheduler, rebuilt with the library.
+    known_ids: HashSet<Uuid>,
+    known_ids_revision: u64,
     last_message: Option<String>,
     /// When the current toast appeared, so transient text cannot live forever.
     message_at: Option<Instant>,
@@ -198,6 +213,8 @@ pub struct VibeRadioApp {
     pending_wish_verify: Vec<std::path::PathBuf>,
     /// Files waiting for the single fingerprint worker.
     pending_fingerprint: Vec<std::path::PathBuf>,
+    /// Files in the running fingerprint batch, so they are not queued twice.
+    fingerprint_active: HashSet<std::path::PathBuf>,
     /// Files whose AcoustID lookup failed, retried after a delay.
     fingerprint_retry: HashMap<std::path::PathBuf, (Instant, u8)>,
     /// A verified-song organizer pass in flight.
@@ -229,6 +246,8 @@ pub struct VibeRadioApp {
     language: i18n::Lang,
     /// Whether the compact always-on-top player is shown.
     mini_open: bool,
+    /// Last fullscreen state sent to the viewport, so it is not repeated.
+    display_applied: bool,
     /// OS media controls (MPRIS/SMTC), when available.
     media: Option<media::Media>,
     /// Last state published to the media controls.
@@ -346,6 +365,10 @@ pub struct VibeRadioApp {
     session_name: String,
     schedules: Vec<Schedule>,
     scheduler: SchedulerRuntime,
+    /// Runs schedules independently of the egui frame callback.
+    coordinator: Option<Coordinator>,
+    coordinator_library_revision: u64,
+    last_coordinator_sync: Instant,
     schedule_editor: Option<ScheduleEditor>,
     /// Streams a record-only schedule started muted. Their 0.0 engine volume
     /// must not be copied into the user's persisted/default volume.
@@ -376,6 +399,48 @@ struct ViewKey {
     sort: SortKey,
     ascending: bool,
     show_broken: bool,
+}
+
+/// Lowercased station fields, rebuilt only when the library changes. Sorting
+/// and searching used to lowercase every field on every comparison.
+struct StationKeys {
+    lower_name: String,
+    lower_genre: String,
+    lower_country: String,
+    /// Every searchable field, lowercased and newline-separated.
+    haystack: String,
+}
+
+impl StationKeys {
+    fn new(station: &Station) -> Self {
+        let mut haystack = String::new();
+        for field in [
+            Some(station.name.as_str()),
+            Some(station.url.as_str()),
+            station.genre.as_deref(),
+            station.country.as_deref(),
+            station.country_state.as_deref(),
+            station.city.as_deref(),
+            station.tags.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            haystack.push_str(&field.to_lowercase());
+            haystack.push('\n');
+        }
+        Self {
+            lower_name: station.name.to_lowercase(),
+            lower_genre: station.genre.as_deref().unwrap_or("").to_lowercase(),
+            lower_country: station.country.as_deref().unwrap_or("").to_lowercase(),
+            haystack,
+        }
+    }
+
+    #[cfg(test)]
+    fn matches(&self, needle: &str) -> bool {
+        self.haystack.contains(needle)
+    }
 }
 
 struct Attempt {
@@ -574,6 +639,13 @@ impl VibeRadioApp {
             match db.init_schema() {
                 Ok(()) => {
                     schema_ok = true;
+                    match db.prune_history(365) {
+                        Ok(removed) if removed > 0 => {
+                            log::info!("pruned {removed} history row(s) older than 365 days")
+                        }
+                        Ok(_) => {}
+                        Err(e) => log::warn!("could not prune old history: {e}"),
+                    }
                     if let Ok(Some(version)) = db.get_setting("schema_version") {
                         log::info!("database schema version {version}");
                         schema_version = version;
@@ -792,7 +864,18 @@ impl VibeRadioApp {
             db,
             player,
             history,
-            ui: UiState::default(),
+            ui: {
+                let mut ui = UiState::default();
+                // Media-centre autostart: launch straight into the display view.
+                ui.display_mode = std::env::var_os("VIBERADIO_DISPLAY").is_some();
+                // Kiosk and screenshot runs can pin the initial theme.
+                ui.theme = match std::env::var("VIBERADIO_THEME").as_deref() {
+                    Ok("light") => ThemeMode::Light,
+                    Ok("dark") => ThemeMode::Dark,
+                    _ => ui.theme,
+                };
+                ui
+            },
             applied_theme: None,
             last_engine_revision: 0,
             last_active_id: None,
@@ -804,6 +887,10 @@ impl VibeRadioApp {
             stats_key: None,
             view_key: None,
             view_indices: Vec::new(),
+            station_keys: Vec::new(),
+            station_keys_revision: u64::MAX,
+            known_ids: HashSet::new(),
+            known_ids_revision: u64::MAX,
             last_message,
             message_at: None,
             shown_message: None,
@@ -827,6 +914,7 @@ impl VibeRadioApp {
             wish_verify: None,
             pending_wish_verify: Vec::new(),
             pending_fingerprint: Vec::new(),
+            fingerprint_active: HashSet::new(),
             fingerprint_retry: HashMap::new(),
             verified_organize: None,
             verified_pending: false,
@@ -846,6 +934,7 @@ impl VibeRadioApp {
             applied_stream_buffer: stream_buffer_secs,
             language,
             mini_open: false,
+            display_applied: false,
             media,
             last_media: None,
             tray,
@@ -894,6 +983,9 @@ impl VibeRadioApp {
             session_name: String::new(),
             schedules,
             scheduler: SchedulerRuntime::new(),
+            coordinator: None,
+            coordinator_library_revision: u64::MAX,
+            last_coordinator_sync: Instant::now(),
             schedule_editor: None,
             scheduler_muted: HashSet::new(),
             finalising: Vec::new(),
@@ -906,6 +998,13 @@ impl VibeRadioApp {
             now_playing_at: HashMap::new(),
             last_heartbeat: Instant::now(),
         };
+        app.coordinator = Some(Coordinator::start(
+            app.player.control(),
+            app.coordinator_state(),
+            app.data_dir_path
+                .as_ref()
+                .map(|dir| dir.join("viberadio.db").display().to_string()),
+        ));
         // Importing a directory is the user's choice from the sidebar. A fresh
         // install starts with an empty library and never fetches stations on
         // its own.
@@ -1637,87 +1736,7 @@ impl VibeRadioApp {
                 log::info!("ignored track on {station_name}: {title}");
                 continue;
             }
-            let hits =
-                crate::metadata::wish_matches_with_format(&self.wishlist, &title, Some(&format));
-            if !hits.is_empty() {
-                let labels: Vec<String> = hits
-                    .iter()
-                    .map(|hit| {
-                        format!(
-                            "{} — {}",
-                            hit.artist.as_deref().unwrap_or("any artist"),
-                            hit.song_title.as_deref().unwrap_or("any song")
-                        )
-                    })
-                    .collect();
-                let mut record = false;
-                let mut activate = false;
-                for hit in &hits {
-                    match hit.action.trim().to_ascii_lowercase().as_str() {
-                        "record" => record = true,
-                        "activate" | "play" => activate = true,
-                        "record+activate" | "record_activate" => {
-                            record = true;
-                            activate = true;
-                        }
-                        _ => {}
-                    }
-                }
-                let mut done: Vec<&str> = Vec::new();
-                let mut record_failed = false;
-                if record {
-                    let watching = self
-                        .watch_streams
-                        .values()
-                        .any(|watch_id| *watch_id == id);
-                    let started = if watching {
-                        self.promote_watch_recording(id, station_id, &title)
-                    } else {
-                        self.start_recording_on(id, true, true)
-                    };
-                    if started {
-                        done.push("recording");
-                    } else {
-                        record_failed = true;
-                    }
-                }
-                if activate {
-                    let volume = self
-                        .stations
-                        .iter()
-                        .find(|station| station.id == station_id)
-                        .map(|station| station.volume)
-                        .unwrap_or(1.0)
-                        .clamp(0.0, 1.0);
-                    if self.player.snapshot().active.map(|active| active.id) != Some(id) {
-                        self.player.set_active(id);
-                    }
-                    self.scheduler_muted.remove(&id);
-                    self.player.set_stream_volume(id, volume);
-                    self.settings.volume = volume;
-                    done.push("activated");
-                }
-                if record_failed {
-                    done.push("recording failed");
-                }
-                let detail = if done.is_empty() {
-                    "no action".to_string()
-                } else {
-                    done.join(", ")
-                };
-                log::info!(
-                    "wish-list hits on {station_name}: {}; {detail}",
-                    labels.join("; ")
-                );
-                // A refused record already set the specific reason (low disk or
-                // quality filter); do not replace it with a generic hit toast.
-                if !(record_failed && !activate) {
-                    self.last_message = Some(tf(
-                        "msg.wish_hit",
-                        &[&format!("{} ({detail})", labels.join("; "))],
-                    ));
-                }
-            }
+            self.apply_wish_hits(id, station_id, &station_name, &title, &format, false);
 
             let Some(instance_id) = self.attempts.get(&id).map(|attempt| attempt.instance_id)
             else {
@@ -3037,8 +3056,216 @@ impl VibeRadioApp {
     /// Remove the active window of a schedule without running its finish
     /// action, and stop the stream/recording it owns.
     fn cancel_schedule_window(&mut self, id: Uuid) {
+        if let Some(coordinator) = &self.coordinator {
+            coordinator.update(|state| state.cancel.push(id));
+        }
         if let Some(effect) = self.scheduler.cancel(id) {
             self.apply_scheduler_effect(effect);
+        }
+    }
+
+    /// The state the coordinator needs to run schedules without the UI.
+    fn coordinator_state(&self) -> CoordinatorState {
+        CoordinatorState {
+            schedules: self.schedules.clone(),
+            stations: Arc::new(self.coordinator_stations()),
+            known: Arc::new(self.coordinator_known()),
+            recording: Some(self.schedule_recording_config()),
+            wishlist: self.wishlist.clone(),
+            ignore_list: self.ignore_list.clone(),
+            tag_formats: self.coordinator_tag_formats(),
+            wishlist_only: self.recording_wishlist_only,
+            min_free_mb: self.recording_min_free_mb,
+            min_kbps: self.recording_min_kbps,
+            codec: self.recording_codec.clone(),
+            cancel: Vec::new(),
+            active_count: 0,
+            enabled: true,
+        }
+    }
+
+    /// A recording config for a scheduled capture. The coordinator applies the
+    /// action's split mode and the wishlist-only filter.
+    fn schedule_recording_config(&self) -> RecordingConfig {
+        let mut config = RecordingConfig::new(&self.recording_dir);
+        config.template = self.recording_template.clone();
+        config.min_track_seconds = self.recording_min_track_seconds;
+        config.min_fingerprint_seconds = self.recording_min_fingerprint_seconds;
+        if self.recording_wishlist_only {
+            config.keep_short = true;
+            config.wishlist = self.wishlist.clone();
+        }
+        config
+    }
+
+    /// Tag formats for watched stations, used to parse ICY labels for wishes.
+    fn coordinator_tag_formats(&self) -> HashMap<Uuid, String> {
+        let Some(db) = &self.db else {
+            return HashMap::new();
+        };
+        self.stations
+            .iter()
+            .filter(|station| station.watched)
+            .filter_map(|station| {
+                db.custom_tag_format(station.id)
+                    .ok()
+                    .flatten()
+                    .map(|format| (station.id, format))
+            })
+            .collect()
+    }
+
+    fn coordinator_stations(&self) -> Vec<CoordStation> {
+        self.stations
+            .iter()
+            .map(|station| CoordStation {
+                id: station.id,
+                name: station.name.clone(),
+                url: station.url.clone(),
+                watched: station.watched,
+                bitrate: station.bitrate,
+                codec: station.codec.clone(),
+            })
+            .collect()
+    }
+
+    fn coordinator_known(&self) -> HashSet<Uuid> {
+        self.stations.iter().map(|station| station.id).collect()
+    }
+
+    /// Keep the coordinator's small snapshot current. Stations are sent only
+    /// when the library changes; schedules and settings once a second.
+    fn sync_coordinator(&mut self) {
+        let library_changed = self.coordinator_library_revision != self.library_revision;
+        let periodic = self.last_coordinator_sync.elapsed() >= Duration::from_secs(1);
+        let schedules = if periodic {
+            self.schedules.clone()
+        } else {
+            Vec::new()
+        };
+        let recording = if periodic {
+            Some(self.schedule_recording_config())
+        } else {
+            None
+        };
+        let wishlist = if periodic {
+            self.wishlist.clone()
+        } else {
+            Vec::new()
+        };
+        let tag_formats = if periodic {
+            self.coordinator_tag_formats()
+        } else {
+            HashMap::new()
+        };
+        let ignore_list = if periodic {
+            self.ignore_list.clone()
+        } else {
+            Vec::new()
+        };
+        let min_free_mb = self.recording_min_free_mb;
+        let min_kbps = self.recording_min_kbps;
+        let codec = self.recording_codec.clone();
+        let wishlist_only = self.recording_wishlist_only;
+        if let Some(coordinator) = &self.coordinator {
+            if library_changed {
+                let stations = Arc::new(self.coordinator_stations());
+                let known = Arc::new(self.coordinator_known());
+                coordinator.update(|state| {
+                    state.stations = stations;
+                    state.known = known;
+                });
+            }
+            if periodic {
+                let mut schedules = schedules;
+                coordinator.update(|state| {
+                    crate::coordinator::merge_marks(&state.schedules, &mut schedules);
+                    state.schedules = schedules;
+                    state.recording = recording;
+                    state.wishlist = wishlist;
+                    state.ignore_list = ignore_list;
+                    state.tag_formats = tag_formats;
+                    state.wishlist_only = wishlist_only;
+                    state.min_free_mb = min_free_mb;
+                    state.min_kbps = min_kbps;
+                    state.codec = codec;
+                });
+            }
+        }
+        if library_changed {
+            self.coordinator_library_revision = self.library_revision;
+        }
+        if periodic {
+            self.last_coordinator_sync = Instant::now();
+        }
+    }
+
+    /// Apply what the background coordinator did while the UI may not have run.
+    fn drain_coordinator_events(&mut self) {
+        loop {
+            let Some(event) = self.coordinator.as_ref().and_then(Coordinator::try_recv) else {
+                break;
+            };
+            match event {
+                CoordinatorEvent::ScheduleFired { id, at } => {
+                    if let Some(schedule) = self.schedules.iter_mut().find(|s| s.id == id) {
+                        schedule.last_fired_at = Some(at);
+                    }
+                    if let Some(db) = &self.db {
+                        if let Err(e) = db.mark_schedule_fired(id, at) {
+                            log::warn!("could not mark schedule {id} fired: {e}");
+                        }
+                    }
+                }
+                CoordinatorEvent::Started {
+                    station_id,
+                    playback_id,
+                    recording,
+                    split,
+                    audible,
+                    ..
+                } => {
+                    if audible {
+                        self.selected_station = Some(station_id);
+                    }
+                    if recording {
+                        self.recording_stations.insert(playback_id, station_id);
+                        self.recording_splits.insert(playback_id, split);
+                    }
+                }
+                CoordinatorEvent::Stopped {
+                    playback_id,
+                    recording,
+                } => {
+                    if let Some(id) = playback_id {
+                        self.recording_stations.remove(&id);
+                        self.recording_splits.remove(&id);
+                        if recording {
+                            let _ = self.player.take_finished_recording(id);
+                        }
+                    }
+                }
+                CoordinatorEvent::RecordingFinished(summary) => {
+                    self.finish_recording_summary(&summary);
+                }
+                CoordinatorEvent::WishHit {
+                    station,
+                    playback_id,
+                    title,
+                } => {
+                    self.recording_stations.insert(playback_id, station);
+                    self.recording_splits.insert(playback_id, true);
+                    let name = self
+                        .stations
+                        .iter()
+                        .find(|candidate| candidate.id == station)
+                        .map(|candidate| candidate.name.as_str())
+                        .unwrap_or("");
+                    self.last_message = Some(tf("msg.wish_captured", &[&title, name]));
+                }
+                CoordinatorEvent::Finish(action) => self.pending_finish.push(action),
+                CoordinatorEvent::Status(message) => self.last_message = Some(message),
+            }
         }
     }
 
@@ -3046,10 +3273,13 @@ impl VibeRadioApp {
     /// before running effects, then apply start/stop/finish in order.
     fn tick_schedules(&mut self) {
         let now = Utc::now();
-        let known: HashSet<Uuid> = self.stations.iter().map(|station| station.id).collect();
+        if self.known_ids_revision != self.library_revision {
+            self.known_ids = self.stations.iter().map(|station| station.id).collect();
+            self.known_ids_revision = self.library_revision;
+        }
         let result = self
             .scheduler
-            .tick(&self.schedules, &known, now, &scheduler::resolve_local);
+            .tick(&self.schedules, &self.known_ids, now, &scheduler::resolve_local);
 
         // Persist before effects: a crash after starting a stream must not let
         // the same occurrence start it again on the next launch.
@@ -3123,7 +3353,7 @@ impl VibeRadioApp {
         }
         let owns_recording = if action.records() {
             playback_id
-                .map(|id| self.start_recording_on(id, action.split(), false))
+                .map(|id| self.start_recording_on(id, action.split(), false, false))
                 .unwrap_or(false)
         } else {
             false
@@ -3434,15 +3664,28 @@ impl VibeRadioApp {
     fn want_current_track(&mut self) {
         let engine = self.player.snapshot();
         // Use the immediate title for the wish, not the catalog display title.
-        let raw = selected_stream(&engine, self.selected_station)
+        let Some(stream) = selected_stream(&engine, self.selected_station)
             .or_else(|| engine.active.as_ref())
-            .and_then(|stream| stream.now_playing.clone());
-        let Some(raw) = raw else {
+        else {
             self.last_message = Some(t("msg.no_track").to_string());
             return;
         };
-        let format = crate::metadata::default_tag_format(&raw);
-        let tag = crate::metadata::split_title(&raw, format);
+        let Some(raw) = stream.now_playing.clone() else {
+            self.last_message = Some(t("msg.no_track").to_string());
+            return;
+        };
+        let id = stream.id;
+        let station_id = stream.station_id;
+        // Parse with the station's custom format so the stored wish matches
+        // the same format the title-change matcher uses.
+        let format = station_id
+            .and_then(|station_id| {
+                self.db
+                    .as_ref()
+                    .and_then(|db| db.custom_tag_format(station_id).ok().flatten())
+            })
+            .unwrap_or_else(|| crate::metadata::default_tag_format(&raw).to_string());
+        let tag = crate::metadata::split_title(&raw, &format);
         if tag.artist.is_none() && tag.title.is_none() {
             self.last_message = Some(t("msg.no_track").to_string());
             return;
@@ -3454,6 +3697,17 @@ impl VibeRadioApp {
             action: "record".to_string(),
             compare: crate::metadata::CompareMode::Contains,
         });
+        // A wish added mid-song would otherwise wait for the next title
+        // change before anything records.
+        if let Some(station_id) = station_id {
+            let station_name = self
+                .stations
+                .iter()
+                .find(|station| station.id == station_id)
+                .map(|station| station.name.clone())
+                .unwrap_or_default();
+            self.apply_wish_hits(id, station_id, &station_name, &raw, &format, true);
+        }
     }
 
     fn toggle_recording(&mut self) {
@@ -3581,6 +3835,7 @@ impl VibeRadioApp {
         playback_id: PlaybackId,
         split: bool,
         wishlist_only: bool,
+        one_shot: bool,
     ) -> bool {
         let Some(stream) = self
             .player
@@ -3593,6 +3848,14 @@ impl VibeRadioApp {
             return false;
         };
         if stream.recording {
+            if one_shot {
+                // A one-off wish arrived while this stream is already
+                // recording; keep the current track and stop after it.
+                self.player
+                    .set_recording_wishlist(playback_id, self.wishlist.clone());
+                self.player.set_recording_one_shot(playback_id);
+                return true;
+            }
             return false;
         }
         if !crate::disk::has_space(
@@ -3642,6 +3905,7 @@ impl VibeRadioApp {
                     .and_then(|db| db.custom_tag_format(id).ok().flatten())
             });
         }
+        config.one_shot = one_shot;
         let station = stream
             .station_id
             .and_then(|id| self.stations.iter().find(|station| station.id == id))
@@ -3701,7 +3965,7 @@ impl VibeRadioApp {
         let Some(id) = self.start_recording_stream(station_id) else {
             return;
         };
-        if self.start_recording_on(id, self.recording_split, false) {
+        if self.start_recording_on(id, self.recording_split, false, false) {
             let name = self
                 .stations
                 .iter()
@@ -3793,9 +4057,10 @@ impl VibeRadioApp {
             .filter(|station| station.watched)
             .map(|station| station.id)
             .collect();
+        let watched_set: HashSet<Uuid> = watched.iter().copied().collect();
         let live: HashSet<PlaybackId> = engine.streams.iter().map(|stream| stream.id).collect();
         self.watch_streams
-            .retain(|station_id, id| watched.contains(station_id) && live.contains(id));
+            .retain(|station_id, id| watched_set.contains(station_id) && live.contains(id));
         for station_id in watched {
             if self.watch_streams.contains_key(&station_id) {
                 continue;
@@ -3829,11 +4094,123 @@ impl VibeRadioApp {
     }
 
     /// Promote a watch stream's rolling buffer to a recording when a wish hits.
+    /// Apply the wishlist to one stream's current title. Called on title
+    /// changes and immediately after "Want this", so a wish added mid-song
+    /// starts recording instead of waiting for the next track.
+    fn apply_wish_hits(
+        &mut self,
+        id: PlaybackId,
+        station_id: Uuid,
+        station_name: &str,
+        raw_title: &str,
+        format: &str,
+        one_shot: bool,
+    ) {
+        let hits =
+            crate::metadata::wish_matches_with_format(&self.wishlist, raw_title, Some(format));
+        if hits.is_empty() {
+            return;
+        }
+        let labels: Vec<String> = hits
+            .iter()
+            .map(|hit| {
+                format!(
+                    "{} — {}",
+                    hit.artist.as_deref().unwrap_or("any artist"),
+                    hit.song_title.as_deref().unwrap_or("any song")
+                )
+            })
+            .collect();
+        let mut record = false;
+        let mut activate = false;
+        for hit in &hits {
+            match hit.action.trim().to_ascii_lowercase().as_str() {
+                "record" => record = true,
+                "activate" | "play" => activate = true,
+                "record+activate" | "record_activate" => {
+                    record = true;
+                    activate = true;
+                }
+                _ => {}
+            }
+        }
+        let mut done: Vec<&str> = Vec::new();
+        let mut record_failed = false;
+        if record {
+            let watching = self
+                .watch_streams
+                .values()
+                .any(|watch_id| *watch_id == id);
+            let already_recording = self
+                .player
+                .snapshot()
+                .streams
+                .iter()
+                .any(|stream| stream.id == id && stream.recording);
+            let started = if watching {
+                self.promote_watch_recording(id, station_id, raw_title, one_shot)
+            } else if already_recording {
+                // The recording is already running; make sure it keeps the
+                // track the user just wished for.
+                self.player
+                    .set_recording_wishlist(id, self.wishlist.clone());
+                if one_shot {
+                    self.player.set_recording_one_shot(id);
+                }
+                true
+            } else {
+                self.start_recording_on(id, true, true, one_shot)
+            };
+            if started {
+                done.push("recording");
+            } else {
+                record_failed = true;
+            }
+        }
+        if activate {
+            let volume = self
+                .stations
+                .iter()
+                .find(|station| station.id == station_id)
+                .map(|station| station.volume)
+                .unwrap_or(1.0)
+                .clamp(0.0, 1.0);
+            if self.player.snapshot().active.map(|active| active.id) != Some(id) {
+                self.player.set_active(id);
+            }
+            self.scheduler_muted.remove(&id);
+            self.player.set_stream_volume(id, volume);
+            self.settings.volume = volume;
+            done.push("activated");
+        }
+        if record_failed {
+            done.push("recording failed");
+        }
+        let detail = if done.is_empty() {
+            "no action".to_string()
+        } else {
+            done.join(", ")
+        };
+        log::info!(
+            "wish-list hits on {station_name}: {}; {detail}",
+            labels.join("; ")
+        );
+        // A refused record already set the specific reason (low disk or
+        // quality filter); do not replace it with a generic hit toast.
+        if !(record_failed && !activate) {
+            self.last_message = Some(tf(
+                "msg.wish_hit",
+                &[&format!("{} ({detail})", labels.join("; "))],
+            ));
+        }
+    }
+
     fn promote_watch_recording(
         &mut self,
         id: PlaybackId,
         station_id: Uuid,
         raw_title: &str,
+        one_shot: bool,
     ) -> bool {
         let Some(station) = self
             .stations
@@ -3870,6 +4247,7 @@ impl VibeRadioApp {
         // The hit is an explicit request; keep a short capture rather than
         // letting the pre-fingerprint length filter delete it.
         config.keep_short = true;
+        config.one_shot = one_shot;
         config.wishlist = self.wishlist.clone();
         config.tag_format = self
             .db
@@ -4057,12 +4435,33 @@ impl VibeRadioApp {
     fn poll_completed_recordings(&mut self) {
         let ids: Vec<PlaybackId> = self.recording_stations.keys().copied().collect();
         for id in ids {
+            // Join a one-shot writer first, so its final file is already in the
+            // completed list when it is drained below.
+            let self_finished = self.player.take_self_finished_recording(id);
             for file in self.player.take_completed_recordings(id) {
                 log::info!("recording {id}: completed {}", file.path.display());
-                if file.unverified {
+                if file.incomplete {
+                    log::warn!(
+                        "recording {id}: {} has an audio gap; not verifying it",
+                        file.path.display()
+                    );
+                    self.last_message = Some(tf(
+                        "msg.recording_gap",
+                        &[&file.path.display().to_string()],
+                    ));
+                } else if file.unverified {
                     self.start_wish_verify(vec![file.path]);
                 } else {
                     self.start_fingerprint_paths(vec![file.path]);
+                }
+            }
+            if self_finished {
+                let summary = self.player.take_finished_recording(id);
+                // The writer is already gone; this clears the recording maps
+                // and the database flag without trying to stop it again.
+                self.stop_recording_on(id);
+                if let Some(summary) = summary {
+                    self.last_message = Some(recording_summary_message(&summary));
                 }
             }
         }
@@ -4128,11 +4527,22 @@ impl VibeRadioApp {
 
     /// Fingerprint the exact files a finished recording kept.
     fn start_fingerprint_paths(&mut self, paths: Vec<std::path::PathBuf>) {
-        self.pending_fingerprint.extend(paths);
-        if self.fingerprint_scan.is_some() || self.pending_fingerprint.is_empty() {
+        let mut added = false;
+        for path in paths {
+            if crate::fingerprint::sidecar_path(&path).exists()
+                || self.pending_fingerprint.contains(&path)
+                || self.fingerprint_active.contains(&path)
+            {
+                continue;
+            }
+            self.pending_fingerprint.push(path);
+            added = true;
+        }
+        if !added || self.fingerprint_scan.is_some() || self.pending_fingerprint.is_empty() {
             return;
         }
         let paths = std::mem::take(&mut self.pending_fingerprint);
+        let active_paths: Vec<std::path::PathBuf> = paths.clone();
         let worker_paths = paths.clone();
         let key = self.acoustid_api_key.trim().to_string();
         let (tx, rx) = std::sync::mpsc::channel();
@@ -4143,7 +4553,10 @@ impl VibeRadioApp {
                 let _ = tx.send(crate::fingerprint::fingerprint_paths(&worker_paths, key));
             });
         match spawned {
-            Ok(_) => self.fingerprint_scan = Some(rx),
+            Ok(_) => {
+                self.fingerprint_active.extend(active_paths);
+                self.fingerprint_scan = Some(rx);
+            }
             Err(e) => {
                 log::warn!("could not start the fingerprint worker: {e}");
                 self.pending_fingerprint.extend(paths);
@@ -4274,9 +4687,22 @@ impl VibeRadioApp {
     // -----------------------------------------------------------------------
 
     fn ensure_view(&mut self) {
+        if self.station_keys_revision != self.library_revision
+            || self.station_keys.len() != self.stations.len()
+        {
+            self.station_keys = self.stations.iter().map(StationKeys::new).collect();
+            self.station_keys_revision = self.library_revision;
+        }
+        let recent_filter = matches!(self.ui.filter, LibraryFilter::RecentlyPlayed);
         let key = ViewKey {
             library_revision: self.library_revision,
-            history_version: self.history_version,
+            // History only affects the recently-played filter; a title change
+            // must not rebuild the whole table otherwise.
+            history_version: if recent_filter {
+                self.history_version
+            } else {
+                0
+            },
             filter: self.ui.filter.clone(),
             search: self.ui.search.clone(),
             sort: self.ui.sort,
@@ -4287,9 +4713,14 @@ impl VibeRadioApp {
             return;
         }
 
-        let recent: HashSet<Uuid> = self.history.iter().map(|entry| entry.station_id).collect();
-        let indices = build_view(
+        let recent: HashSet<Uuid> = if recent_filter {
+            self.history.iter().map(|entry| entry.station_id).collect()
+        } else {
+            HashSet::new()
+        };
+        let indices = build_view_indexed(
             &self.stations,
+            &self.station_keys,
             &recent,
             &key.filter,
             &key.search,
@@ -4328,6 +4759,11 @@ impl VibeRadioApp {
                 .iter()
                 .filter(|station| shown(station))
                 .filter(|station| station.watched)
+                .count(),
+            broken: self
+                .stations
+                .iter()
+                .filter(|station| station.broken)
                 .count(),
             genres: genres.into_iter().collect(),
         }
@@ -4456,6 +4892,11 @@ impl VibeRadioApp {
             }
             Action::OpenAbout => self.ui.show_about = true,
             Action::OpenHelp => self.ui.show_help = true,
+            Action::OpenStationInfo(id) => {
+                self.selected_station = Some(id);
+                self.ui.show_station_info = true;
+            }
+            Action::ToggleDisplayMode => self.ui.display_mode = !self.ui.display_mode,
             Action::NewSchedule => self.begin_schedule(None),
             Action::ScheduleStation(id) => self.begin_schedule(Some(id)),
             Action::EditSchedule(id) => self.edit_schedule(id),
@@ -4769,6 +5210,152 @@ impl VibeRadioApp {
         self.ui.show_help = open;
     }
 
+    /// Station details and links, so the library can point at the station's
+    /// own site instead of only its stream.
+    fn render_station_info(&mut self, ctx: &egui::Context, theme: &Theme) {
+        if !self.ui.show_station_info {
+            return;
+        }
+        let station = self
+            .selected_station
+            .and_then(|id| self.stations.iter().find(|station| station.id == id))
+            .cloned();
+        let mut open = true;
+        let mut close = false;
+        egui::Window::new(t("station_info.title"))
+            .open(&mut open)
+            .default_width(500.0)
+            .resizable(false)
+            .show(ctx, |ui| {
+                let Some(station) = station.as_ref() else {
+                    ui.label(t("station_info.none"));
+                    return;
+                };
+                ui.heading(&station.name);
+                if let Some(genre) = info_value(station.genre.as_deref()) {
+                    ui.label(
+                        egui::RichText::new(genre)
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_secondary),
+                    );
+                }
+                ui.add_space(ui::space::S);
+                let row = |ui: &mut egui::Ui, label: &str, value: &str| {
+                    ui.label(
+                        egui::RichText::new(label)
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(value)
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_primary),
+                    );
+                    ui.end_row();
+                };
+                let bitrate = station
+                    .bitrate
+                    .map(|value| format!("{value} kbps"))
+                    .unwrap_or_else(|| t("station_info.empty").to_string());
+                egui::Grid::new("station-info-grid")
+                    .num_columns(2)
+                    .spacing([ui::space::M, ui::space::XS])
+                    .show(ui, |ui| {
+                        row(ui, t("station_info.genre"), info_value(station.genre.as_deref()).unwrap_or(t("station_info.empty")));
+                        row(ui, t("station_info.country"), info_value(station.country.as_deref()).unwrap_or(t("station_info.empty")));
+                        row(ui, t("station_info.city"), info_value(station.city.as_deref()).unwrap_or(t("station_info.empty")));
+                        row(ui, t("station_info.codec"), info_value(station.codec.as_deref()).unwrap_or(t("station_info.empty")));
+                        row(ui, t("station_info.bitrate"), &bitrate);
+                        row(ui, t("station_info.source"), info_value(station.source_id.as_deref()).unwrap_or(t("station_info.empty")));
+                        row(ui, t("station_info.added"), info_value(station.date_added.as_deref()).unwrap_or(t("station_info.empty")));
+                        row(ui, t("station_info.last_played"), info_value(station.date_last_played.as_deref()).unwrap_or(t("station_info.empty")));
+                        row(ui, t("station_info.play_count"), &station.play_count.to_string());
+                    });
+                if let Some(tags) = info_value(station.tags.as_deref()) {
+                    ui.add_space(ui::space::S);
+                    ui.label(
+                        egui::RichText::new(t("station_info.tags"))
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(tags)
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_primary),
+                    );
+                }
+                if let Some(comment) = info_value(station.comment.as_deref()) {
+                    ui.add_space(ui::space::S);
+                    ui.label(
+                        egui::RichText::new(t("station_info.comment"))
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_secondary),
+                    );
+                    ui.label(
+                        egui::RichText::new(comment)
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_primary),
+                    );
+                }
+                ui.add_space(ui::space::M);
+                ui.separator();
+                ui.add_space(ui::space::S);
+                if let Some(website) = info_value(station.website.as_deref()) {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(t("station_info.website"))
+                                .size(ui::text::CAPTION)
+                                .color(theme.text_secondary),
+                        );
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    egui::RichText::new(t("station_info.open_website"))
+                                        .color(theme.bg_app),
+                                )
+                                .fill(theme.accent),
+                            )
+                            .clicked()
+                        {
+                            if let Err(e) = crate::system::open_path(std::path::Path::new(website))
+                            {
+                                log::warn!("cannot open the station website: {e}");
+                            }
+                        }
+                    });
+                    ui.label(
+                        egui::RichText::new(website)
+                            .size(ui::text::SECTION)
+                            .color(theme.text_secondary),
+                    );
+                }
+                ui.add_space(ui::space::S);
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(t("station_info.stream"))
+                            .size(ui::text::CAPTION)
+                            .color(theme.text_secondary),
+                    );
+                    if ui.button(t("station_info.copy_stream")).clicked() {
+                        ui.ctx().copy_text(station.url.clone());
+                    }
+                });
+                ui.label(
+                    egui::RichText::new(&station.url)
+                        .size(ui::text::SECTION)
+                        .color(theme.text_secondary),
+                );
+                ui.add_space(ui::space::M);
+                if ui.button(t("common.close")).clicked() {
+                    close = true;
+                }
+            });
+        if close {
+            open = false;
+        }
+        self.ui.show_station_info = open;
+    }
+
     fn render_schedules_window(&mut self, ctx: &egui::Context, theme: &Theme) -> Vec<Action> {
         if !self.ui.show_schedules {
             return Vec::new();
@@ -4778,7 +5365,11 @@ impl VibeRadioApp {
         let schedules = &self.schedules;
         let stations = &self.stations;
         let editor = &mut self.schedule_editor;
-        let active_count = self.scheduler.active_count();
+        let active_count = self
+            .coordinator
+            .as_ref()
+            .map(Coordinator::active_count)
+            .unwrap_or_else(|| self.scheduler.active_count());
 
         egui::Window::new(t("schedules.title"))
             .open(&mut open)
@@ -5097,7 +5688,7 @@ fn recording_summary_message(summary: &RecordedSummary) -> String {
         &[
             &summary.files.to_string(),
             &summary.bytes.to_string(),
-            if summary.dropped {
+            if summary.dropped || summary.incomplete > 0 {
                 t("msg.recording_dropped")
             } else {
                 ""
@@ -5220,7 +5811,7 @@ fn same_track(
 }
 
 /// Whether a station meets the configured recording quality filter.
-fn recording_quality_allowed(
+pub(crate) fn recording_quality_allowed(
     bitrate: Option<u32>,
     codec: Option<&str>,
     min_kbps: u32,
@@ -5292,8 +5883,26 @@ fn compare_label(mode: crate::metadata::CompareMode) -> &'static str {
     }
 }
 
+/// Test helper: build the lowercase keys once and use the production path.
+#[cfg(test)]
 fn build_view(
     stations: &[Station],
+    recent: &HashSet<Uuid>,
+    filter: &LibraryFilter,
+    search: &str,
+    sort: SortKey,
+    ascending: bool,
+    show_broken: bool,
+) -> Vec<usize> {
+    let keys: Vec<StationKeys> = stations.iter().map(StationKeys::new).collect();
+    build_view_indexed(
+        stations, &keys, recent, filter, search, sort, ascending, show_broken,
+    )
+}
+
+fn build_view_indexed(
+    stations: &[Station],
+    keys: &[StationKeys],
     recent: &HashSet<Uuid>,
     filter: &LibraryFilter,
     search: &str,
@@ -5305,7 +5914,7 @@ fn build_view(
     let mut indices: Vec<usize> = stations
         .iter()
         .enumerate()
-        .filter(|(_, station)| {
+        .filter(|(index, station)| {
             if station.broken && !show_broken {
                 return false;
             }
@@ -5316,7 +5925,7 @@ fn build_view(
                 LibraryFilter::Watched => station.watched,
                 LibraryFilter::Genre(genre) => station.genre.as_deref() == Some(genre.as_str()),
             };
-            filter_match && (needle.is_empty() || search_matches(station, &needle))
+            filter_match && (needle.is_empty() || keys[*index].haystack.contains(&needle))
         })
         .map(|(index, _)| index)
         .collect();
@@ -5324,45 +5933,22 @@ fn build_view(
     indices.sort_by(|left, right| {
         let a = &stations[*left];
         let b = &stations[*right];
+        let ka = &keys[*left];
+        let kb = &keys[*right];
         let ordering = match sort {
-            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
-            SortKey::Genre => a
-                .genre
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase()
-                .cmp(&b.genre.as_deref().unwrap_or("").to_lowercase()),
+            SortKey::Name => ka.lower_name.cmp(&kb.lower_name),
+            SortKey::Genre => ka.lower_genre.cmp(&kb.lower_genre),
             SortKey::Bitrate => a.bitrate.cmp(&b.bitrate),
-            SortKey::Country => a
-                .country
-                .as_deref()
-                .unwrap_or("")
-                .to_lowercase()
-                .cmp(&b.country.as_deref().unwrap_or("").to_lowercase()),
+            SortKey::Country => ka.lower_country.cmp(&kb.lower_country),
         };
         let ordering = if ascending {
             ordering
         } else {
             ordering.reverse()
         };
-        ordering.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        ordering.then_with(|| ka.lower_name.cmp(&kb.lower_name))
     });
     indices
-}
-
-fn search_matches(station: &Station, needle: &str) -> bool {
-    let field = |value: Option<&str>| {
-        value
-            .map(|value| value.to_lowercase().contains(needle))
-            .unwrap_or(false)
-    };
-    station.name.to_lowercase().contains(needle)
-        || station.url.to_lowercase().contains(needle)
-        || field(station.genre.as_deref())
-        || field(station.country.as_deref())
-        || field(station.country_state.as_deref())
-        || field(station.city.as_deref())
-        || field(station.tags.as_deref())
 }
 
 impl eframe::App for VibeRadioApp {
@@ -5378,6 +5964,13 @@ impl eframe::App for VibeRadioApp {
                 crate::ui::theme::install_fonts(ctx, scripts);
             }
         }
+        if self.coordinator.as_ref().is_some_and(Coordinator::is_finished) {
+            self.coordinator = None;
+            self.last_message = Some(t("msg.coordinator_stopped").to_string());
+        }
+        self.drain_coordinator_events();
+        self.sync_coordinator();
+
         let mut tray_events = Vec::new();
         if let Some(tray) = &self.tray {
             while let Some(event) = tray.poll() {
@@ -5407,6 +6000,23 @@ impl eframe::App for VibeRadioApp {
         }
         if tray_closed {
             self.tray = None;
+        }
+
+        // F11 toggles the media-centre view; Escape leaves it (or closes the
+        // station-info window first).
+        if ctx.input(|i| i.key_pressed(egui::Key::F11)) {
+            self.ui.display_mode = !self.ui.display_mode;
+        }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.ui.show_station_info {
+                self.ui.show_station_info = false;
+            } else if self.ui.display_mode {
+                self.ui.display_mode = false;
+            }
+        }
+        if self.ui.display_mode != self.display_applied {
+            self.display_applied = self.ui.display_mode;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.ui.display_mode));
         }
 
         let mut media_events = Vec::new();
@@ -5531,6 +6141,7 @@ impl eframe::App for VibeRadioApp {
         }
         if let Some(result) = scanned {
             self.fingerprint_scan = None;
+            self.fingerprint_active.clear();
             let retries = match &result {
                 Ok(report) => report.retry.clone(),
                 Err(_) => Vec::new(),
@@ -5762,7 +6373,9 @@ impl eframe::App for VibeRadioApp {
 
         // Wall-clock evaluation, not `Instant`: a suspend/resume must not skip a
         // schedule, and a missed occurrence is caught up from its stored window.
-        self.tick_schedules();
+        if self.coordinator.is_none() {
+            self.tick_schedules();
+        }
         let mut engine = self.player.snapshot();
 
         // Forget recording streams that ended on their own.
@@ -7040,7 +7653,7 @@ impl eframe::App for VibeRadioApp {
         }
         self.poll_playlist();
         self.ensure_playlist();
-        let stats_key = (self.library_revision, self.history_version);
+        let stats_key = (self.library_revision, self.history_version, self.ui.show_broken);
         if self.stats_key != Some(stats_key) {
             self.stats = self.library_stats();
             self.stats_key = Some(stats_key);
@@ -7098,6 +7711,31 @@ impl eframe::App for VibeRadioApp {
         let next_schedule = self.next_schedule_label();
         let display_track = self.display_track(&engine);
 
+        if self.ui.display_mode {
+            let provider_playlist = self.selected_station.and_then(|id| self.playlists.get(&id));
+            let merged = merged_playlist(self.selected_station, &self.history, provider_playlist);
+            let playlist = if merged.entries.is_empty() && merged.next.is_none() {
+                None
+            } else {
+                Some(&merged)
+            };
+            let volume = engine
+                .active
+                .as_ref()
+                .map(|stream| stream.volume)
+                .unwrap_or(self.settings.volume);
+            ui::display::render(
+                ctx,
+                &theme,
+                &engine,
+                active_station.as_ref(),
+                display_track.as_ref(),
+                playlist,
+                self.selected_station,
+                volume,
+                &mut actions,
+            );
+        } else {
         // Player bar pinned to the bottom, then the optional stream list above it.
         egui::TopBottomPanel::bottom("player-bar")
             .exact_height(ui::PLAYER_HEIGHT)
@@ -7153,6 +7791,11 @@ impl eframe::App for VibeRadioApp {
             .resizable(false)
             .frame(egui::Frame::none().fill(theme.bg_sidebar))
             .show(ctx, |ui| {
+                let seam = ui.max_rect();
+                ui.painter().line_segment(
+                    [seam.right_top(), seam.right_bottom()],
+                    egui::Stroke::new(1.0, theme.border),
+                );
                 actions.extend(ui::sidebar::render(ui, &theme, &mut self.ui, &stats));
             });
 
@@ -7187,6 +7830,11 @@ impl eframe::App for VibeRadioApp {
                     .inner_margin(egui::Margin::symmetric(12.0, 8.0)),
             )
             .show(ctx, |ui| {
+                let seam = ui.max_rect();
+                ui.painter().line_segment(
+                    [seam.left_top(), seam.left_bottom()],
+                    egui::Stroke::new(1.0, theme.border),
+                );
                 ui::now_playing::render(
                     ui,
                     &theme,
@@ -7211,18 +7859,21 @@ impl eframe::App for VibeRadioApp {
                     &theme,
                     &mut self.ui,
                     &self.stations,
+                    self.stats.broken,
                     &self.view_indices,
                     self.selected_station,
                     table_active_station,
                     &live_stations,
                 ));
             });
+        }
 
         actions.extend(self.render_add_dialog(ctx, &theme));
         self.render_remove_dialog(ctx);
         actions.extend(self.render_schedules_window(ctx, &theme));
         self.render_about_window(ctx);
         self.render_help_window(ctx);
+        self.render_station_info(ctx, &theme);
 
         // An immediate viewport is rendered during the root's update pass. The
         // app requests a repaint every 500 ms, so the mini keeps updating while
@@ -7312,6 +7963,9 @@ impl eframe::App for VibeRadioApp {
 
 impl Drop for VibeRadioApp {
     fn drop(&mut self) {
+        // Stop the coordinator first so a schedule due during shutdown cannot
+        // start a stream after the streams are closed below.
+        drop(self.coordinator.take());
         // Close and join every recording on exit; a blocking join here is fine
         // and prevents a truncated file behind a scheduled close.
         let recording_ids: Vec<PlaybackId> = self
@@ -7556,9 +8210,10 @@ mod tests {
     fn search_matches_all_visible_fields() {
         let mut value = station("Jazz FM", "Jazz", Some(128), false);
         value.city = Some("London".to_string());
-        assert!(search_matches(&value, "jazz"));
-        assert!(search_matches(&value, "london"));
-        assert!(!search_matches(&value, "rock"));
+        let keys = StationKeys::new(&value);
+        assert!(keys.matches("jazz"));
+        assert!(keys.matches("london"));
+        assert!(!keys.matches("rock"));
     }
 
     #[test]

@@ -40,6 +40,11 @@ lives in a local SQLite database and a recordings folder.
 </p>
 <p align="center"><sub>Light theme</sub></p>
 
+<p align="center">
+  <img src="docs/screenshots/display.png" alt="VibeRadio display mode" width="82%">
+</p>
+<p align="center"><sub>Display mode</sub></p>
+
 ## Features
 
 ### Listening
